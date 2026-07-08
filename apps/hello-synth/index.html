@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hello Synth</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:24px;background:#0b0d12;color:#e7ecf3;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  a{position:fixed;top:16px;left:16px;color:#00e5c7;text-decoration:none;font-size:14px;}
+  h1{margin:0;letter-spacing:-.5px;}
+  p{color:#8a93a6;margin:0;}
+  .pad{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+  .key{width:64px;height:64px;border-radius:12px;border:1px solid #242a38;
+    background:linear-gradient(180deg,#171b26,#12151d);color:#e7ecf3;font-size:13px;
+    cursor:pointer;transition:.08s;}
+  .key:active,.key.on{transform:translateY(2px);border-color:#00e5c7;
+    box-shadow:0 0 18px -4px #00e5c7;}
+</style>
+</head>
+<body>
+  <a href="../../index.html">← Back to hub</a>
+  <h1>Hello Synth</h1>
+  <p>Click a pad (or use keys A S D F G H J K).</p>
+  <div class="pad" id="pad"></div>
+  <script>
+    const notes = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25];
+    const keys = ['a','s','d','f','g','h','j','k'];
+    let ctx;
+    const pad = document.getElementById('pad');
+    function play(i, el){
+      ctx = ctx || new (window.AudioContext||window.webkitAudioContext)();
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type='sine'; o.frequency.value=notes[i];
+      g.gain.setValueAtTime(.001,ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(.3,ctx.currentTime+.01);
+      g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+.6);
+      o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime+.6);
+      if(el){el.classList.add('on');setTimeout(()=>el.classList.remove('on'),150);}
+    }
+    notes.forEach((n,i)=>{
+      const b=document.createElement('button');
+      b.className='key'; b.textContent=keys[i].toUpperCase();
+      b.onclick=()=>play(i,b); pad.appendChild(b);
+    });
+    window.addEventListener('keydown',e=>{
+      const i=keys.indexOf(e.key.toLowerCase());
+      if(i>=0) play(i, pad.children[i]);
+    });
+  </script>
+</body>
+</html>
