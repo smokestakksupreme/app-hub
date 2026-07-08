@@ -99,7 +99,13 @@
     mask-image:linear-gradient(to top, transparent 0%, #000 22%, #000 78%, transparent 100%);
   }
   @media (max-width:720px){
-    .portrait{height:70vh; right:-18vw; opacity:.08;}
+    .portrait{
+      height:auto; width:120vw; max-width:none;
+      right:50%; transform:translateX(50%); bottom:0;
+      opacity:.075;
+      -webkit-mask-image:linear-gradient(to top, transparent 0%, #000 30%, #000 68%, transparent 96%);
+      mask-image:linear-gradient(to top, transparent 0%, #000 30%, #000 68%, transparent 96%);
+    }
   }
 
   /* ---------- content ---------- */
