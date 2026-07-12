@@ -25,6 +25,14 @@ window.APPS = [
     accent: "#ff8a3d",
     added: "2026-07-08"
   },
+  {
+    title: "Timelines of Everything",
+    description: "Scroll the history of the universe — six zoomable timelines from the Big Bang to now, in four languages.",
+    path: "apps/timelines/",
+    tags: ["history", "science", "interactive"],
+    accent: "#e0b23e",
+    added: "2026-07-12"
+  },
 
   // --- copy the block below for each new app ---
   // {
