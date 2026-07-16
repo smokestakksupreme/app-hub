@@ -33,6 +33,14 @@ window.APPS = [
     accent: "#e0b23e",
     added: "2026-07-12"
   },
+  {
+    title: "United States: A Full Accounting",
+    description: "A vertical timeline of U.S. history from the first peoples to today — 297 events, including the ones usually left out, in four languages.",
+    path: "apps/us-timeline/",
+    tags: ["history", "politics", "interactive"],
+    accent: "#5cc8ff",
+    added: "2026-07-16"
+  },
 
   // --- copy the block below for each new app ---
   // {
