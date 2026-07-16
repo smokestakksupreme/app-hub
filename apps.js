@@ -41,6 +41,14 @@ window.APPS = [
     accent: "#5cc8ff",
     added: "2026-07-16"
   },
+  {
+    title: "Mexico: A Full Accounting",
+    description: "A vertical timeline of Mexican history from the first peoples to today — 124 events, including the ones usually left out, in English and Spanish.",
+    path: "apps/mexico-timeline/",
+    tags: ["history", "politics", "interactive"],
+    accent: "#1e9e57",
+    added: "2026-07-16"
+  },
 
   // --- copy the block below for each new app ---
   // {
