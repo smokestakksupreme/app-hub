@@ -49,6 +49,14 @@ window.APPS = [
     accent: "#1e9e57",
     added: "2026-07-16"
   },
+  {
+    title: "Stillpoint: Meditation & Breathwork",
+    description: "12 meditation styles and 9 breathwork techniques — origins, methods, routines, and animated breath pacers, in four languages.",
+    path: "apps/meditation-breathwork.html",
+    tags: ["wellness", "health", "interactive"],
+    accent: "#7fb8a4",
+    added: "2026-07-17"
+  },
 
   // --- copy the block below for each new app ---
   // {
