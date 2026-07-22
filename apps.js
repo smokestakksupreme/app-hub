@@ -50,6 +50,14 @@ window.APPS = [
     added: "2026-07-16"
   },
   {
+    title: "South America: A Full Accounting",
+    description: "A vertical timeline of South American history from the first peoples to today — 679 events across all twelve nations, including the ones usually left out, in English and Spanish.",
+    path: "apps/south-america-timeline/",
+    tags: ["history", "politics", "interactive"],
+    accent: "#7ee787",
+    added: "2026-07-21"
+  },
+  {
     title: "Stillpoint: Meditation & Breathwork",
     description: "12 meditation styles and 9 breathwork techniques — origins, methods, routines, and animated breath pacers, in four languages.",
     path: "apps/meditation-breathwork.html",
