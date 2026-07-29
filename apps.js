@@ -3,7 +3,7 @@
    Copy one block, change the fields, done.
 
    path   = folder (or file) relative to this hub.
-            e.g. "apps/world-dossier/" or "apps/foo/index.html"
+            e.g. "apps/world-dossier/"  or  "apps/foo/index.html"
    accent = any CSS color; sets the card's glow.
    tags   = words you can filter/search by.
    ============================================================ */
@@ -72,6 +72,14 @@ window.APPS = [
     tags: ["wellness", "health", "interactive"],
     accent: "#7fb8a4",
     added: "2026-07-17"
+  },
+  {
+    title: "Money Basics",
+    description: "Nine things that decide whether money works for you or against you — stocks, bonds, retirement accounts, options, crypto, annuities, life insurance, real estate, and trusts. Plain English, with a deep dive on each, in English and Spanish.",
+    path: "apps/money-basics.html",
+    tags: ["finance", "money", "interactive"],
+    accent: "#4c8dff",
+    added: "2026-07-29"
   },
 
   // --- copy the block below for each new app ---
