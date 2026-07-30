@@ -81,6 +81,14 @@ window.APPS = [
     accent: "#4c8dff",
     added: "2026-07-29"
   },
+  {
+    title: "World Religions: A Full Accounting",
+    description: "Vertical timelines of the four largest religions — 254 events, including conquest, forced conversion, schism and abuse — with drawn branch trees of all 118 divisions, plus deep dives on six more traditions.",
+    path: "apps/religions-timeline.html",
+    tags: ["history", "religion", "interactive"],
+    accent: "#7aa7ff",
+    added: "2026-07-30"
+  },
 
   // --- copy the block below for each new app ---
   // {
