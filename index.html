@@ -66,11 +66,13 @@
       radial-gradient(12% 10% at 79% 15%, rgba(80,220,205,.13), transparent 70%);
     filter:blur(14px);
   }
-  /* textured nebula along the bottom (real structure, not gradient) */
+  /* textured nebula — one fixed full-viewport image, faded out toward the top */
   .layer-nebula3{
-    position:fixed; left:0; right:0; bottom:0; height:62vh; z-index:0; pointer-events:none;
+    position:fixed; inset:0; z-index:0; pointer-events:none;
     background:url("assets/nebula.webp") bottom center / cover no-repeat;
     opacity:.55;
+    -webkit-mask-image:linear-gradient(to top, #000 0%, #000 40%, rgba(0,0,0,.55) 65%, transparent 92%);
+    mask-image:linear-gradient(to top, #000 0%, #000 40%, rgba(0,0,0,.55) 65%, transparent 92%);
   }
 
   /* twinkling stars + slow galaxy spin */
@@ -83,30 +85,22 @@
   .galaxy{transform-box:fill-box;transform-origin:center;animation:spin 200s linear infinite;}
   @media (prefers-reduced-motion:reduce){.tw,.galaxy{animation:none;}}
 
+  /* the thinker — top-right corner mark */
+  .thinker{
+    position:fixed; top:18px; right:26px; z-index:0; pointer-events:none; user-select:none;
+    height:min(360px, 40vh); width:auto;
+    opacity:.30;
+    -webkit-mask-image:linear-gradient(to bottom, #000 0%, #000 62%, transparent 99%);
+    mask-image:linear-gradient(to bottom, #000 0%, #000 62%, transparent 99%);
+  }
+  @media (max-width:900px){
+    .thinker{ height:min(210px, 24vh); top:10px; right:10px; opacity:.22; }
+  }
+
   /* sacred geometry + constellations + waveform */
   .layer-geo{
     position:fixed; inset:0; z-index:0; pointer-events:none;
     width:100vw; height:100vh;
-  }
-
-  /* the portrait — barely there */
-  .portrait{
-    position:fixed; right:-4vw; bottom:0; z-index:0;
-    height:92vh; max-width:70vw; object-fit:contain; object-position:bottom right;
-    opacity:.10; pointer-events:none; user-select:none;
-    filter:brightness(1.12);
-    -webkit-mask-image:linear-gradient(to top, transparent 0%, #000 22%, #000 78%, transparent 100%);
-    mask-image:linear-gradient(to top, transparent 0%, #000 22%, #000 78%, transparent 100%);
-  }
-  @media (max-width:720px){
-    .portrait{
-      height:auto; width:120vw; max-width:none;
-      right:50%; transform:translateX(50%); bottom:0;
-      opacity:.12;
-      filter:brightness(1.25) contrast(1.08);
-      -webkit-mask-image:linear-gradient(to top, transparent 0%, #000 30%, #000 68%, transparent 96%);
-      mask-image:linear-gradient(to top, transparent 0%, #000 30%, #000 68%, transparent 96%);
-    }
   }
 
   /* ---------- content ---------- */
@@ -198,6 +192,9 @@
 </style>
 </head>
 <body>
+
+  <!-- the thinker — top-right corner mark -->
+  <img class="thinker" src="assets/thinker.webp" alt="" onerror="this.style.display='none'" />
 
   <!-- background: nebula clouds -->
   <div class="layer-nebula"></div>
@@ -294,8 +291,6 @@
     </g>
   </svg>
 
-  <!-- the portrait cutout (assets/portrait.png) — nearly transparent -->
-  <img class="portrait" src="assets/portrait.webp" alt="" onerror="this.style.display='none'" />
 
   <div class="wrap">
     <header>
