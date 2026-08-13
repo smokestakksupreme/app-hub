@@ -9,7 +9,7 @@
    ============================================================ */
 
 window.APPS = [
-   { title: "True Shot Billiards", description: "Real-physics pool - eight, nine, ten and eleven ball, a ghost race and five timed challenges. Two players on one screen, or online with a room code.", path: "apps/true-shot-billiards.html", tags: ["game", "3d", "physics"], accent: "#c9a86a", added: "2026-08-13" },
+   { title: "True Shot Billiards", description: "Real-physics pool - eight, nine, ten and eleven ball, a ghost race and five timed challenges. Two players on one screen, or online with a room code.", path: "apps/tsb/", tags: ["game", "3d", "physics"], accent: "#c9a86a", added: "2026-08-13" },
   {
     title: "World Dossier",
     description: "An interactive atlas — explore countries, geography, and stats in one map-driven view.",
