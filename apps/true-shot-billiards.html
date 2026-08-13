@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0d0b">
 <title>True Shot Billiards — Real-Physics 8-Ball & 9-Ball</title>
 <style>
   html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0a0d0b;}
@@ -6626,9 +6627,17 @@ window.PoolGame = window.PoolGame || {};
     }
   }
 
+  // The most recent failure, so a caller that only learns "that returned false"
+  // can still report WHY. beginHandshake used to overwrite every connect()
+  // failure with a generic CONNECT, which turned the specific, actionable
+  // NO_HOST ("open the address the host machine is showing") back into
+  // "could not open " with an empty address on the end of it.
+  var lastFail = null;
+
   function fail(code, msg, detail) {
     var o = { code: code, msg: msg == null ? code : String(msg) };
     if (detail) o.detail = detail;
+    lastFail = o;
     emit('error', o);
     return o;
   }
@@ -6654,34 +6663,60 @@ window.PoolGame = window.PoolGame || {};
   }
 
   // ── URL resolution ─────────────────────────────────────────────────────────
-  // The relay lives on its own subdomain, because the page itself is served
-  // from GitHub Pages (static hosting — it serves files and cannot hold a
-  // WebSocket open). Guessing the relay from the page's own address, which is
-  // what this used to do, would send every player to wss://allappsjohnnie.com
-  // and fail with "can't connect" while the relay sat there healthy.
+  // LAN_CONTRACT §3. Two modes, and the difference between them is only ever
+  // "where does the relay live".
   //
-  // Keeping the relay on a domain we own — rather than the hosting provider's
-  // own hostname — is what lets the server move hosts later without shipping a
-  // new mobile build, since an app bakes this address in and users never see it.
-  var RELAY_URL = 'wss://ws.allappsjohnnie.com';
+  //   lan       — the default. One machine on the WiFi serves BOTH the page and
+  //               the relay on one port, so the relay address is simply the page
+  //               address with the scheme swapped. Nothing is guessed.
+  //   internet  — the old behaviour: a relay on its own subdomain, because a
+  //               static host (GitHub Pages) serves files and cannot hold a
+  //               WebSocket open. Retained, tested, and OFF. Turning it back on
+  //               is Net.setMode('internet'), not a rewrite.
+  //
+  // Keeping INTERNET_URL on a domain we own — rather than the hosting
+  // provider's hostname — is what would let the server move hosts later without
+  // shipping a new mobile build, since an app bakes this address in.
+  var INTERNET_URL = 'wss://ws.allappsjohnnie.com';
+  var RELAY_URL = INTERNET_URL;            // retained: older callers read this
+  var MODE = 'lan';
+
+  function setMode(m) {
+    m = (m === 'internet') ? 'internet' : 'lan';
+    // Changing the relay's address out from under a live socket would leave the
+    // seat and the room pointing at a server this client is no longer talking
+    // to. Callers reconnect deliberately instead.
+    if (sock) return false;
+    MODE = m;
+    return true;
+  }
+
+  function sameOriginWs(loc) {
+    return (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host;
+  }
 
   function defaultUrl() {
     var loc = (typeof location !== 'undefined') ? location : null;
-    // Served from a real site → the production relay.
-    if (loc && (loc.protocol === 'https:' || loc.protocol === 'http:') && loc.host) {
-      // localhost / 127.0.0.1 / a LAN IP means someone is developing: talk to a
-      // relay on the same box rather than the live one.
-      if (/^(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(loc.hostname)) {
+    var served = loc && (loc.protocol === 'https:' || loc.protocol === 'http:') && loc.host;
+
+    if (MODE === 'internet') {
+      // Developing against a local relay still wins over the live one.
+      if (served && /^(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(loc.hostname)) {
         return 'ws://' + loc.hostname + ':8080';
       }
-      return RELAY_URL;
+      return INTERNET_URL;
     }
-    // file:// — someone was emailed the HTML and double-clicked it. That is a
-    // real player wanting a real game, not a developer, so it points at the
-    // live relay too. (A file:// page has an opaque origin and no mixed-content
-    // rule, so wss:// connects fine from here.) Developers override with the
-    // server box on the online screen, which persists in localStorage.
-    return RELAY_URL;
+
+    // LAN: the page came from the host machine, so the relay is on the same
+    // host and the same port. This is the whole reason the server serves both.
+    if (served) return sameOriginWs(loc);
+
+    // file:// — someone was emailed the HTML and double-clicked it. In LAN mode
+    // there is no host to derive and no internet relay to fall back to, so this
+    // returns nothing rather than dialling an address that was never there.
+    // ui.js reads the empty string and explains how to start a host instead of
+    // showing a Join button that cannot work. (LAN_CONTRACT §3, §4.)
+    return '';
   }
 
   function resolvedUrl() { return cfg.url || defaultUrl(); }
@@ -6765,6 +6800,15 @@ window.PoolGame = window.PoolGame || {};
     dropSocket();
     openSend = firstFrame || null;
     var url = resolvedUrl();
+    // LAN mode on a file:// page: there is no host to derive an address from.
+    // Answer with a code the UI can turn into "open the address the host
+    // machine is showing" rather than letting `new WebSocket('')` throw a
+    // SyntaxError that reads to the player as a network fault.
+    if (!url) {
+      fail('NO_HOST', 'this copy was opened as a file, so there is no host to join — ' +
+        'open the address shown on the machine running the game');
+      return false;
+    }
     var s;
     try {
       s = new Ctor(url);
@@ -7171,8 +7215,9 @@ window.PoolGame = window.PoolGame || {};
       state = 'connecting';
       pending = { kind: kind, resolve: resolve, reject: reject, timer: null };
       armHandshakeTimeout();
+      lastFail = null;
       if (!connect(frame)) {
-        var o = { code: 'CONNECT', msg: 'could not open ' + resolvedUrl() };
+        var o = lastFail || { code: 'CONNECT', msg: 'could not open ' + resolvedUrl() };
         settleHandshake(false, o);
         state = 'closed';
       }
@@ -7192,12 +7237,22 @@ window.PoolGame = window.PoolGame || {};
     // could name (and save, and then connect to) a different address than the
     // one net.js had actually chosen.
     defaultUrl: function () {
-      try { return defaultUrl(); } catch (e) { return RELAY_URL; }
+      try { return defaultUrl(); } catch (e) { return MODE === 'lan' ? '' : INTERNET_URL; }
     },
 
     // The address in force right now, override included.
     url: function () {
-      try { return resolvedUrl(); } catch (e) { return RELAY_URL; }
+      try { return resolvedUrl(); } catch (e) { return MODE === 'lan' ? '' : INTERNET_URL; }
+    },
+
+    // ── Deployment mode (LAN_CONTRACT §3) ───────────────────────────────────
+    // 'lan' is the shipped default: the relay is wherever the page came from.
+    // 'internet' is the dormant path — intact and gated, not deleted, so
+    // switching back is a flag rather than a rewrite.
+    get MODE() { return MODE; },
+    INTERNET_URL: INTERNET_URL,
+    setMode: function (m) {
+      try { return setMode(m); } catch (e) { return false; }
     },
 
     host: function (gameId, name) {
@@ -7956,6 +8011,51 @@ window.PoolGame = window.PoolGame || {};
 
   /* back control */
   /* studio credit — mirrors .pgui-back's inset so the two sit on one line */
+  /* ---- add to home screen (PWA) ---- */
+  // Bottom-left of the menu, opposite the studio credit. Deliberately quiet:
+  // this is an offer, not a call to action, and it disappears for good the
+  // first time it is refused.
+  '.pgui-install{position:absolute;left:clamp(16px,3vw,44px);bottom:clamp(16px,3vmin,36px);' +
+    'z-index:4;display:flex;align-items:center;gap:.6em;max-width:min(84vw,30em);}' +
+  '.pgui-installbtn{appearance:none;cursor:pointer;font:inherit;' +
+    'font-size:clamp(11px,1.25vmin,13px);font-weight:700;letter-spacing:.13em;' +
+    'text-indent:.13em;text-transform:uppercase;color:rgba(232,222,198,.9);' +
+    'padding:.85em 1.5em;border-radius:999px;min-height:44px;' +
+    'border:1px solid rgba(201,168,106,.42);background:rgba(14,20,17,.72);' +
+    '-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);' +
+    'transition:border-color .2s ease,background .2s ease,transform .12s ease;}' +
+  '.pgui-installbtn:hover{border-color:rgba(201,168,106,.8);background:rgba(22,30,25,.86);}' +
+  '.pgui-installbtn:active{transform:translateY(1px);}' +
+  '.pgui-installhint{display:flex;align-items:center;gap:.5em;' +
+    'font-size:clamp(11px,1.2vmin,13px);color:rgba(226,218,200,.82);line-height:1.35;' +
+    'padding:.7em 1.1em;border-radius:' + U(1.2) + ';' +
+    'border:1px solid rgba(201,168,106,.3);background:rgba(14,20,17,.74);' +
+    '-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);}' +
+  '.pgui-installx{appearance:none;border:0;background:none;cursor:pointer;' +
+    'color:rgba(226,218,200,.6);font-size:18px;line-height:1;padding:0 0 0 .2em;' +
+    'min-width:32px;min-height:32px;}' +
+  '.pgui-update{position:absolute;left:50%;transform:translateX(-50%);' +
+    'top:clamp(14px,2.6vmin,30px);z-index:6;display:none;align-items:center;gap:.9em;' +
+    'font-size:clamp(11px,1.2vmin,13px);color:rgba(232,222,198,.92);' +
+    'padding:.7em 1.1em;border-radius:999px;' +
+    'border:1px solid rgba(201,168,106,.4);background:rgba(14,20,17,.86);' +
+    '-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);}' +
+  '.pgui-update.pgui-show{display:flex;}' +
+  '.pgui-updatebtn{appearance:none;cursor:pointer;font:inherit;font-weight:700;' +
+    'font-size:inherit;letter-spacing:.1em;text-transform:uppercase;' +
+    'color:#12100c;background:rgba(201,168,106,.92);border:0;border-radius:999px;' +
+    'padding:.55em 1.15em;min-height:32px;}' +
+  // On a phone there is no spare corner: pinned bottom-left, this sat directly
+  // on top of the menu footer text. Narrow screens take it out of the corner
+  // and put it in the flow, after the footer, where it can have the width it
+  // needs and nothing to collide with.
+  '@media (max-width:700px),(orientation:portrait){' +
+    '.pgui-install{position:static;left:auto;bottom:auto;max-width:none;' +
+      'justify-content:center;flex-wrap:wrap;' +
+      'margin:0 auto calc(1.1em + env(safe-area-inset-bottom));' +
+      'padding:0 clamp(14px,4vw,28px) 1.1em;}' +
+    '.pgui-installhint{flex:1 1 16em;}' +
+  '}' +
   '.pgui-studio{position:absolute;top:clamp(16px,3vmin,36px);right:clamp(16px,3vw,44px);z-index:4;' +
     'pointer-events:none;user-select:none;white-space:nowrap;' +
     'font-size:clamp(9px,1.05vmin,12px);font-weight:700;' +
@@ -8378,6 +8478,42 @@ window.PoolGame = window.PoolGame || {};
     'color:rgba(232,228,218,.66);text-align:center;margin-top:clamp(10px,1.5vmin,18px);' +
     'max-width:38em;text-wrap:balance;text-wrap-style:balance;}' +
   '.pgui-nethint b{color:rgba(201,168,106,.92);font-weight:700;}' +
+
+  /* ---- same-WiFi join block (LAN_CONTRACT §4) ----
+     The host's screen is the thing the other player is standing next to, so the
+     address is set as large as the room code and the QR is a real scanning
+     target rather than a decoration. */
+  '.pgui-joinblock{display:none;flex-direction:column;align-items:center;width:100%;' +
+    'gap:clamp(8px,1.2vmin,14px);margin-top:clamp(14px,2.1vmin,24px);}' +
+  '.pgui-joinblock.pgui-show{display:flex;}' +
+  // address beside the QR where there is width, stacked where there is not —
+  // the host panel already carries the code tiles and must still fit a phone
+  '.pgui-joinrow{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;' +
+    'gap:clamp(12px,1.8vmin,22px);width:100%;}' +
+  '.pgui-joinaddr{font-family:' + MONO + ';user-select:text;-webkit-user-select:text;' +
+    'font-size:clamp(18px,2.6vmin,32px);font-weight:700;line-height:1.25;color:#f6f2ff;' +
+    'text-align:center;word-break:break-all;max-width:100%;' +
+    'padding:clamp(10px,1.4vmin,16px) clamp(14px,2vmin,24px);border-radius:12px;' +
+    'background:rgba(0,0,0,.45);border:1px solid rgba(184,166,255,.5);' +
+    'box-shadow:inset 0 2px 12px rgba(0,0,0,.5);}' +
+  '.pgui-joinaddr::selection{background:rgba(184,166,255,.42);color:#fff;}' +
+  // white plate on purpose: a QR needs its quiet zone and its contrast, and a
+  // phone camera does not care about the house palette
+  '.pgui-qr{display:none;flex:none;width:clamp(132px,19vmin,200px);height:clamp(132px,19vmin,200px);' +
+    'padding:clamp(7px,1vmin,11px);border-radius:12px;background:#fff;' +
+    'box-shadow:0 10px 28px rgba(0,0,0,.5),0 0 0 1px rgba(184,166,255,.35);}' +
+  '.pgui-qr.pgui-show{display:block;}' +
+  '.pgui-qr img{display:block;width:100%;height:100%;}' +
+  // file:// has no server to join, so the tab explains how to start one
+  // instead of offering a button that can only fail
+  '.pgui-lannote{display:none;font-size:clamp(11px,1.25vmin,14.5px);line-height:1.8;' +
+    'letter-spacing:.06em;color:rgba(232,228,218,.78);text-align:center;' +
+    'max-width:min(560px,88vw);margin:0 auto;}' +
+  '.pgui-lannote.pgui-show{display:block;}' +
+  '.pgui-lannote b{color:rgba(201,168,106,.92);font-weight:700;}' +
+  '.pgui-lannote code{font-family:' + MONO + ';font-size:.94em;letter-spacing:0;' +
+    'color:#f6f2ff;background:rgba(0,0,0,.45);border:1px solid rgba(184,166,255,.4);' +
+    'border-radius:6px;padding:.15em .5em;user-select:text;-webkit-user-select:text;}' +
   '.pgui-netrow{display:flex;gap:clamp(9px,1.4vmin,18px);flex-wrap:wrap;justify-content:center;' +
     'margin-top:clamp(12px,1.8vmin,22px);}' +
   /* three animated dots that survive prefers-reduced-motion by simply stopping */
@@ -8585,7 +8721,157 @@ window.PoolGame = window.PoolGame || {};
      that already glows — two rings, light core over gold halo */
   '.pgui-btn:focus{outline:none;}' +
   '.pgui-btn.pgui-focus{box-shadow:0 0 0 2px rgba(255,246,224,.92),0 0 0 ' + U(0.6) +
-    ' rgba(201,168,106,.42),0 10px 26px rgba(0,0,0,.5);}';
+    ' rgba(201,168,106,.42),0 10px 26px rgba(0,0,0,.5);}' +
+
+  /* ====================== COARSE POINTER (TOUCH_CONTRACT §4/§5) ==============
+     One build, two control schemes. main.js decides which pointer is in use
+     right now and mirrors it onto <body> as pg-coarse / pg-fine; every layout
+     difference below hangs off that class rather than off JS restyling, so a
+     player who puts the phone down and picks up a mouse gets the desktop HUD
+     back on the next pointerdown with nothing to rebuild.
+     Nothing here is a second HUD: the same widgets, bigger. */
+
+  /* The whole chrome scale drops one step in coarse (§5's 22 % short-axis
+     budget) — badge, tray, plaques, challenge HUD and hints all ride --pgu, so
+     one number moves all of them. The two drag controls do NOT shrink with it:
+     they are floored in px below. */
+  'body.pg-coarse .pgui-root{--pgu:clamp(7.2px,1.02vmin,10.6px);}' +
+  'body.pg-coarse .pgui-hud{user-select:none;-webkit-user-select:none;}' +
+  // A phone cannot hold two 176px plaques, a mode badge and the tray on one
+  // row. Let the plaques shrink to their own type and the chips wrap under
+  // them: the top bar then costs what it needs and no more (§5's budget).
+  'body.pg-coarse .pgui-plaque{min-width:0;flex:0 1 auto;}' +
+  'body.pg-coarse .pgui-chiprow{flex-wrap:wrap;}' +
+  // the canvas host: without this the browser takes a downward drag for a
+  // scroll or a pull-to-refresh partway through a stroke
+  'body.pg-coarse .pgui-touchhost{touch-action:none;}' +
+
+  /* ---- power meter = the stroke control ---- */
+  // It can no longer fade out between shots: on a touchscreen this is the only
+  // way to shoot, and you cannot grab a widget that is not on screen.
+  'body.pg-coarse .pgui-power{opacity:1;transform:none;pointer-events:auto;' +
+    'left:' + U(0.7) + ';gap:' + U(0.8) + ';' +
+    'padding:' + U(1.1) + ' ' + U(0.9) + ' ' + U(0.8) + ';}' +
+  'body.pg-coarse .pgui-power-track{width:max(64px,' + U(6.4) + ');' +
+    'touch-action:none;pointer-events:auto;cursor:ns-resize;}' +
+  // An unarmed track is an empty black rectangle, and in portrait the caption
+  // under it is dropped for height — so at rest the control had nothing left
+  // saying it could be grabbed. This is the affordance: a soft gradient, a
+  // downward chevron and the word PULL, all of which fade to nothing the
+  // instant the stroke is armed so they never sit under the moving fill.
+  'body.pg-coarse .pgui-power-hint{position:absolute;left:0;right:0;bottom:' + U(0.7) + ';' +
+    'display:flex;flex-direction:column;align-items:center;gap:' + U(0.25) + ';' +
+    'pointer-events:none;user-select:none;z-index:2;' +
+    'opacity:.72;transition:opacity .18s ease;}' +
+  'body.pg-coarse .pgui-power-hint b{font-size:clamp(8px,1.5vmin,11px);font-weight:800;' +
+    'letter-spacing:.22em;text-indent:.22em;color:rgba(228,214,182,.62);}' +
+  'body.pg-coarse .pgui-power-hint i{font-style:normal;line-height:.7;' +
+    'font-size:clamp(11px,2.1vmin,15px);color:rgba(201,168,106,.75);' +
+    'animation:pgui-pullnudge 1.9s ease-in-out infinite;}' +
+  '@keyframes pgui-pullnudge{0%,100%{transform:translateY(-2px);opacity:.55;}' +
+    '50%{transform:translateY(2px);opacity:1;}}' +
+  'body.pg-coarse .pgui-power.pgui-armed .pgui-power-hint,' +
+    'body.pg-coarse .pgui-power.pgui-wound .pgui-power-hint{opacity:0;}' +
+  '.pgui-power-hint{display:none;}' +
+  'body.pg-coarse .pgui-power-hint{display:flex;}' +
+  // a resting sheen so the empty track reads as a slot, not a hole
+  'body.pg-coarse .pgui-power-track::before{content:"";position:absolute;inset:0;' +
+    'background:linear-gradient(to bottom,rgba(255,255,255,.05),rgba(255,255,255,0) 38%,' +
+    'rgba(201,168,106,.07));pointer-events:none;z-index:1;' +
+    'transition:opacity .18s ease;}' +
+  'body.pg-coarse .pgui-power.pgui-armed .pgui-power-track::before,' +
+    'body.pg-coarse .pgui-power.pgui-wound .pgui-power-track::before{opacity:0;}' +
+  '@media (prefers-reduced-motion:reduce){' +
+    'body.pg-coarse .pgui-power-hint i{animation:none;}}' +
+  // while a stroke is armed the track lights so the finger has something to
+  // read under it — same gold as every other live control
+  'body.pg-coarse .pgui-power.pgui-armed .pgui-power-track{border-color:rgba(201,168,106,.72);' +
+    'box-shadow:inset 0 2px 8px rgba(0,0,0,.8),0 0 ' + U(1.8) + ' rgba(201,168,106,.35);}' +
+
+  /* ---- spin ball ---- */
+  'body.pg-coarse .pgui-spin{right:' + U(0.7) + ';gap:' + U(0.8) + ';' +
+    'padding:' + U(1.1) + ' ' + U(0.9) + ' ' + U(0.8) + ';}' +
+  'body.pg-coarse .pgui-spin-ball{width:max(120px,' + U(13.3) + ');height:max(120px,' + U(13.3) + ');}' +
+  'body.pg-coarse .pgui-spin-dot{width:max(28px,' + U(1.78) + ');height:max(28px,' + U(1.78) + ');}' +
+  'body.pg-coarse .pgui-spin-reset{min-height:44px;min-width:44px;' +
+    'display:flex;align-items:center;justify-content:center;}' +
+
+  /* ---- the coarse-only control strip ----
+     Built and destroyed with the mode (see buildTouchStrip): in fine mode these
+     elements are not in the document at all, so they cannot catch a click. */
+  '.pgui-tstrip{position:absolute;left:0;right:0;bottom:0;z-index:9;' +
+    'display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:nowrap;' +
+    'padding:8px 8px calc(8px + env(safe-area-inset-bottom));' +
+    'pointer-events:none;user-select:none;-webkit-user-select:none;}' +
+  '.pgui-tbtn{pointer-events:auto;touch-action:manipulation;-webkit-tap-highlight-color:transparent;' +
+    'min-width:44px;min-height:44px;padding:0 ' + U(1.5) + ';' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'font-family:inherit;font-size:' + U(1.45) + ';font-weight:800;letter-spacing:.12em;text-indent:.12em;' +
+    'line-height:1;text-transform:uppercase;color:rgba(240,232,214,.92);border-radius:999px;' +
+    'background:linear-gradient(160deg,rgba(24,30,26,.78),rgba(12,16,13,.86));' +
+    'backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);' +
+    'border:1px solid rgba(201,168,106,.3);' +
+    'box-shadow:0 8px 24px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.06);' +
+    'transition:transform .12s ease,background .18s ease,border-color .18s ease;}' +
+  // their shot: the strip is guarded in JS as well, this is the part the player
+  // can see
+  '.pgui-tstrip.pgui-dim{opacity:.4;}' +
+  '.pgui-tbtn.pgui-hot{transform:scale(.94);border-color:rgba(201,168,106,.78);' +
+    'background:linear-gradient(160deg,rgba(52,44,20,.86),rgba(22,18,9,.9));}' +
+  '.pgui-tbtn.pgui-arrow{font-size:' + U(2.1) + ';padding:0;width:52px;}' +
+  '.pgui-tbtn.pgui-ok{color:#161208;border-color:rgba(201,168,106,.9);' +
+    'background:linear-gradient(180deg,#e9d3a2,#c9a86a 60%,#a9884c);' +
+    'box-shadow:0 8px 24px rgba(0,0,0,.5),0 0 ' + U(2.2) + ' rgba(201,168,106,.3);}' +
+
+  /* ---- §5 layout: portrait is a first-class orientation ----
+     The table is landscape and the phone is not, so the strip takes the bottom
+     edge and the two drag widgets sit above it instead of fighting it for the
+     corners. No force-rotate, no "please rotate your device" card. */
+  '@media (orientation:portrait){' +
+    // clear of the strip, not on top of it
+    'body.pg-coarse .pgui-power,body.pg-coarse .pgui-spin{' +
+      'bottom:calc(' + U(8.6) + ' + env(safe-area-inset-bottom));}' +
+    'body.pg-coarse .pgui-topbar{max-width:100vw;padding:0 ' + U(0.8) + ';gap:' + U(0.8) + ';' +
+      // the settings toggles own the top-left corner and the bar is centred:
+      // at this width they are the same pixels, so the bar drops below them
+      'top:' + U(5.2) + ';}' +
+    'body.pg-coarse .pgui-botstack{bottom:calc(' + U(31) + ' + env(safe-area-inset-bottom));' +
+      'padding:0 ' + U(1.2) + ';}' +
+    // portrait is narrow: the strip takes the whole width and the buttons space
+    // themselves out, so five 44px targets still fit on a 360px phone
+    'body.pg-coarse .pgui-tstrip{justify-content:space-evenly;}' +
+    'body.pg-coarse .pgui-tbtn{padding:0 ' + U(0.9) + ';}' +
+    // Height is the scarce thing here and every pixel the widgets give back is
+    // table. A 64px bar and a 120px ball caption themselves; the shorter track
+    // is still a longer pull than the phone is wide.
+    // A single nowrap line ellipsises mid-sentence on a 390 px phone, and a
+    // status message cut off at "...TAKES THE" reads as a broken build rather
+    // than a narrow one. Two wrapped lines cost less height than the ellipsis
+    // costs meaning.
+    'body.pg-coarse .pgui-msgline{white-space:normal;text-overflow:clip;' +
+      'line-height:1.25;max-width:min(94vw,' + U(40) + ');' +
+      'display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;' +
+      'border-radius:' + U(1.6) + ';}' +
+    'body.pg-coarse .pgui-power .pgui-widget-label,' +
+      'body.pg-coarse .pgui-spin .pgui-widget-label{display:none;}' +
+    'body.pg-coarse .pgui-power-track{height:min(' + U(22.6) + ',17vh);}' +
+    'body.pg-coarse .pgui-spin-reset{min-height:0;min-width:0;' +
+      'padding:' + U(0.6) + ' ' + U(1.43) + ' ' + U(0.48) + ';}' +
+  '}' +
+  '@media (orientation:landscape){' +
+    'body.pg-coarse .pgui-power,body.pg-coarse .pgui-spin{' +
+      'bottom:calc(' + U(1.4) + ' + env(safe-area-inset-bottom));}' +
+    // clear of the strip below and of the two widgets either side
+    'body.pg-coarse .pgui-botstack{bottom:calc(' + U(7.6) + ' + env(safe-area-inset-bottom));' +
+      'padding:0 ' + U(13) + ';}' +
+  '}' +
+  // A phone on its side has 390 px of height to spend and the strip has already
+  // spent 60 of them. The hint bar is the one thing on the HUD that says
+  // something the buttons underneath it are already saying, so it is what goes.
+  '@media (orientation:landscape) and (max-height:560px){' +
+    'body.pg-coarse .pgui-hint{display:none;}' +
+    'body.pg-coarse .pgui-topbar{top:' + U(0.6) + ';}' +
+  '}';
 
   /* ================================================================ helpers */
 
@@ -9526,6 +9812,301 @@ window.PoolGame = window.PoolGame || {};
     });
   }
 
+  /* ====================================================== INPUT MODE (§1) */
+
+  /* TOUCH_CONTRACT §1: main.js owns detection and publishes PoolGame.Input;
+     ui.js is a reader and nothing more. The build concatenates ui.js BEFORE
+     main.js, so Input does not exist yet when init() runs — we take the same
+     first guess main.js takes, then latch onto the real thing the moment it
+     turns up and let it correct us. Everything downstream of `inputMode` is a
+     body class, because CSS can switch a layout and JS restyling cannot be
+     undone reliably when the player picks the mouse back up mid-match. */
+
+  var inputMode = 'fine';
+  var inputUnsub = null;
+  var inputPoll = null;
+  var inputTries = 0;
+
+  function guessInputMode() {
+    try {
+      return (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ? 'coarse' : 'fine';
+    } catch (e) { return 'fine'; }
+  }
+
+  function inputApi() {
+    var I = window.PoolGame && window.PoolGame.Input;
+    return (I && typeof I.onChange === 'function') ? I : null;
+  }
+
+  function isCoarse() { return inputMode === 'coarse'; }
+
+  // The body classes are main.js's to write. Writing the same two values here
+  // is idempotent and identical, so whichever of us gets there first the CSS is
+  // right and the other one is a no-op — and a harness that mounts the UI with
+  // no Input module at all still gets one of the two layouts rather than none.
+  function applyInputMode(mode) {
+    inputMode = mode === 'coarse' ? 'coarse' : 'fine';
+    var b = document.body;
+    if (b && b.classList) {
+      b.classList.toggle('pg-coarse', inputMode === 'coarse');
+      b.classList.toggle('pg-fine', inputMode !== 'coarse');
+    }
+    syncTouchStrip();
+    syncHintText();
+  }
+
+  function bindInputMode() {
+    if (inputUnsub) { try { inputUnsub(); } catch (e) { /* ignore */ } inputUnsub = null; }
+    if (inputPoll) { clearInterval(inputPoll); inputPoll = null; }
+    var I = inputApi();
+    if (I) {
+      applyInputMode(I.mode || guessInputMode());
+      try { inputUnsub = I.onChange(applyInputMode); } catch (e) { inputUnsub = null; }
+      return;
+    }
+    applyInputMode(guessInputMode());
+    // Keep looking. main.js normally publishes Input in the same tick, but on a
+    // slow first boot (or a test that mounts the UI first and the game after)
+    // it can be seconds later, and the mode has to be right when it arrives.
+    // After half a minute this build simply has no Input module — an old
+    // main.js, or a harness driving the UI on its own — and the guess stands
+    // rather than polling for the life of the page.
+    inputTries = 0;
+    inputPoll = setInterval(function () {
+      inputTries++;
+      if (inputApi()) { bindInputMode(); return; }
+      if (inputTries > 300) { clearInterval(inputPoll); inputPoll = null; }
+    }, 100);
+  }
+
+  /* ------------------------------------------- coarse control strip (§4) */
+
+  var TOUCH_NUDGE_STEP = 0.0016;   // one tap — the same step as the Shift-held keyboard nudge
+  var TOUCH_HOLD_DELAY = 260;      // ms of hold before the repeat starts
+  var TOUCH_HOLD_RATE = 0.09;      // rad/s while held
+  var TOUCH_HOLD_TICK = 40;        // ms between repeat ticks
+  var stripStops = [];             // hold-repeat cancellers, so a strip can be torn down mid-press
+
+  function mainObj() { return window.PoolGame && window.PoolGame.Main; }
+
+  // main.js may not have the §2 verbs yet (it loads after us, and older builds
+  // never had them). A missing verb is a control that does nothing, not a
+  // TypeError that takes the HUD down with it.
+  function mainCall(name, arg) {
+    var M = mainObj();
+    if (!M || typeof M[name] !== 'function') return false;
+    try { M[name](arg); } catch (e) { return false; }
+    return true;
+  }
+
+  // The HUD's answer to menuLive(): a control may only act while the table is
+  // the thing on screen, nothing is over it, and the table is actually ours.
+  // main.js guards every verb again (§2) — this is the near side of the same
+  // rule, so a touch control can never act on the opponent's turn.
+  // `viewOnly` is the camera: main.js keeps cycleCam live on the opponent's
+  // turn on purpose — watching from another angle authors nothing — so the
+  // button that calls it must not be stricter than the verb behind it.
+  function hudLive(viewOnly) {
+    if (!els.hud || els.hud.classList.contains('pgui-hidden')) return false;
+    if (menuLive()) return false;
+    if (els.pause && els.pause.parentNode) return false;      // paused
+    if (viewOnly) return true;
+    if (netActive() && myTurnNow() === false) return false;   // their shot
+    return true;
+  }
+
+  function tbtn(parent, cls, label, aria) {
+    var b = el('button', 'pgui-tbtn' + (cls ? ' ' + cls : ''), parent, label);
+    b.type = 'button';
+    b.setAttribute('aria-label', aria || label);
+    // the canvas is listening underneath: a press that reaches it would aim the
+    // cue at the button the player just pressed
+    b.addEventListener('mousedown', function (ev) { ev.stopPropagation(); ev.preventDefault(); });
+    return b;
+  }
+
+  function bindTap(btn, verb, viewOnly) {
+    btn.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (!hudLive(viewOnly)) return;
+      mainCall(verb);
+    });
+  }
+
+  // Tap = one step, hold = repeat after TOUCH_HOLD_DELAY. The repeat is
+  // time-based rather than a fixed step per tick, so a busy frame slows the aim
+  // down instead of dropping the rotation on the floor.
+  function bindNudge(btn, dir) {
+    var delay = null, timer = null, last = 0;
+    function stop() {
+      if (delay) { clearTimeout(delay); delay = null; }
+      if (timer) { clearInterval(timer); timer = null; }
+      btn.classList.remove('pgui-hot');
+    }
+    function step(rad) {
+      if (!hudLive()) { stop(); return; }
+      mainCall('nudgeAimBy', dir * rad);
+    }
+    btn.addEventListener('pointerdown', function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (!hudLive()) return;
+      try { btn.setPointerCapture(ev.pointerId); } catch (e) { /* headless */ }
+      btn.classList.add('pgui-hot');
+      step(TOUCH_NUDGE_STEP);
+      delay = setTimeout(function () {
+        delay = null;
+        last = Date.now();
+        timer = setInterval(function () {
+          var t = Date.now();
+          var dt = (t - last) / 1000;
+          last = t;
+          step(TOUCH_HOLD_RATE * dt);
+        }, TOUCH_HOLD_TICK);
+      }, TOUCH_HOLD_DELAY);
+    });
+    btn.addEventListener('pointerup', function (ev) { ev.stopPropagation(); stop(); });
+    btn.addEventListener('pointercancel', stop);
+    btn.addEventListener('lostpointercapture', stop);
+    stripStops.push(stop);
+  }
+
+  function buildTouchStrip() {
+    if (els.tStrip || !els.hud) return;
+    var strip = el('div', 'pgui-tstrip', els.hud);
+    els.tStrip = strip;
+
+    els.tNudgeL = tbtn(strip, 'pgui-arrow', '‹', 'Nudge aim left');
+    els.tNudgeR = tbtn(strip, 'pgui-arrow', '›', 'Nudge aim right');
+    els.tTarget = tbtn(strip, null, 'Target', 'Snap aim to the next legal ball');
+    els.tCam = tbtn(strip, null, 'Cam', 'Change camera');
+    els.tPlaceOK = tbtn(strip, 'pgui-ok pgui-gone', 'Place', 'Place the cue ball here');
+
+    bindNudge(els.tNudgeL, -1);
+    bindNudge(els.tNudgeR, 1);
+    bindTap(els.tTarget, 'snapTarget');
+    bindTap(els.tCam, 'cycleCam', true);
+    bindTap(els.tPlaceOK, 'confirmPlace');
+  }
+
+  // §4: in fine mode these must not exist in a way that can catch an event, so
+  // they do not exist at all. Rebuilding them is five buttons and no state.
+  function destroyTouchStrip() {
+    for (var i = 0; i < stripStops.length; i++) {
+      try { stripStops[i](); } catch (e) { /* ignore */ }
+    }
+    stripStops = [];
+    if (els.tStrip && els.tStrip.parentNode) els.tStrip.parentNode.removeChild(els.tStrip);
+    els.tStrip = null;
+    els.tNudgeL = els.tNudgeR = els.tTarget = els.tCam = els.tPlaceOK = null;
+  }
+
+  function syncTouchStrip() {
+    if (!els.hud) return;
+    if (isCoarse()) buildTouchStrip(); else destroyTouchStrip();
+    paintPlaceBtn();
+  }
+
+  // Ball-in-hand is the only state the confirm button belongs to; it comes off
+  // the same HUD feed the placement prompt reads.
+  function paintPlaceBtn() {
+    if (!els.tPlaceOK) return;
+    var placing = !!(lastHud && lastHud.ballInHand);
+    els.tPlaceOK.classList.toggle('pgui-gone', !placing);
+  }
+
+  /* ----------------------------------------- power meter as stroke control */
+
+  var powerDrag = { id: null, y0: 0, span: 1 };
+
+  // §4: the same widget, bigger. pointerdown arms the stroke, travel DOWN the
+  // track maps to 0..1 and release fires — the same direction as the mouse
+  // drag, so a player who switches devices mid-match keeps their muscle memory.
+  function bindPowerTouch() {
+    var track = els.powerTrack;
+    if (!track) return;
+
+    function toValue(ev) {
+      var v = (ev.clientY - powerDrag.y0) / powerDrag.span;
+      return v < 0 ? 0 : v > 1 ? 1 : v;
+    }
+    function setV(v) {
+      // main.js owns the number; it repaints the meter through setPowerVisual.
+      // Only when the verb is missing do we drive the visual ourselves, so the
+      // widget still reads in a build (or a test) without the §2 API.
+      if (!mainCall('powerSet', v)) UI.setPowerVisual(v);
+    }
+    function end(ev) {
+      if (powerDrag.id === null) return;
+      powerDrag.id = null;
+      els.power.classList.remove('pgui-armed');
+      try { track.releasePointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+      if (!mainCall('powerRelease')) UI.setPowerVisual(0);
+    }
+
+    track.addEventListener('pointerdown', function (ev) {
+      // Fine mode leaves this widget exactly as it was: a readout. The mouse
+      // stroke is a drag on the table and must not gain a second entry point.
+      if (!isCoarse() || !hudLive()) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      var rect = track.getBoundingClientRect();
+      powerDrag.id = ev.pointerId;
+      powerDrag.y0 = ev.clientY;
+      // Travel is measured against the track's own height: one full-length pull
+      // is one full-power shot wherever on the track the finger landed.
+      powerDrag.span = rect.height || 1;
+      els.power.classList.add('pgui-armed');
+      try { track.setPointerCapture(ev.pointerId); } catch (e) { /* headless */ }
+      if (!mainCall('powerBegin')) UI.setPowerVisual(0);
+    });
+    track.addEventListener('pointermove', function (ev) {
+      if (powerDrag.id === null || ev.pointerId !== powerDrag.id) return;
+      ev.stopPropagation();
+      setV(toValue(ev));
+    });
+    track.addEventListener('pointerup', function (ev) {
+      if (ev.pointerId !== powerDrag.id) return;
+      ev.stopPropagation();
+      end(ev);
+    });
+    track.addEventListener('pointercancel', function (ev) { end(ev); });
+    track.addEventListener('lostpointercapture', function (ev) { end(ev); });
+    track.addEventListener('mousedown', function (ev) {
+      if (isCoarse()) { ev.stopPropagation(); ev.preventDefault(); }
+    });
+  }
+
+  /* ------------------------------------------------------------ hint copy */
+
+  var SEP = ' &nbsp;&middot;&nbsp; ';
+  // V14: the full list wrapped to three lines at 1024x640, leaving "menu" alone
+  // on the last one. Everything in a `.pgui-opt` span is a secondary binding and
+  // drops out under 1200px, so the shoot loop always fits.
+  // "Esc menu" is now "Esc pause": Escape opens the pause overlay (§1.3, M1)
+  // instead of destroying a timed run outright.
+  var HINT_FINE =
+    '<b>Move mouse</b> to aim' +
+    '<i class="pgui-opt">' + SEP + '<b>Shift</b> fine aim' + SEP + '<b>&larr; &rarr;</b> nudge' +
+    SEP + '<b>Tab</b> target ball</i>' +
+    SEP + '<b>Hold &amp; drag down</b> for power, release to shoot' +
+    '<i class="pgui-opt">' + SEP + '<b>Scroll</b> zoom' + SEP + '<b>C</b> camera</i>' +
+    SEP + '<b>Esc</b> pause';
+  // Not one of the bindings above exists on a touchscreen, and a hint bar that
+  // names controls the device does not have is worse than no hint bar.
+  var HINT_COARSE =
+    '<b>Drag</b> to aim' +
+    '<i class="pgui-opt">' + SEP + '<b>&lsaquo; &rsaquo;</b> fine aim' + SEP + '<b>Target</b> next ball</i>' +
+    SEP + '<b>Drag the power bar down</b>, release to shoot' +
+    '<i class="pgui-opt">' + SEP + '<b>Two fingers</b> orbit &amp; pinch to zoom</i>';
+
+  function syncHintText() {
+    if (!els.hint) return;
+    var want = isCoarse() ? HINT_COARSE : HINT_FINE;
+    if (els.hint.innerHTML !== want) els.hint.innerHTML = want;
+  }
+
   /* ================================================================ BUILD */
 
   function injectStyle() {
@@ -9562,7 +10143,8 @@ window.PoolGame = window.PoolGame || {};
     // The unlock rule is already stated directly under the grid by lvNote, so
     // this line carries the other half of the story rather than repeating it.
     levels: 'Your best run is saved automatically',
-    host: 'Read the code out over the phone, or send it &nbsp;&middot;&nbsp; ' +
+    // LAN: the address gets them to the page, the code gets them to this table
+    host: 'Show them the address, then the code &nbsp;&middot;&nbsp; ' +
       '<b>Back</b> closes the room',
     join: 'Ask your opponent for their four-character code &nbsp;&middot;&nbsp; ' +
       '<b>Back</b> returns to the games'
@@ -9651,6 +10233,7 @@ window.PoolGame = window.PoolGame || {};
     startTimer: null,
     srvOpen: false,
     cards: [],           // {tag} for the four multi cards, for the tab repaint
+    join: '',            // LAN join address the server reported on `hosted`
     // in-match chrome
     driven: false,       // main.js has taken over the chrome — stop auto-driving
     st: { state: 'idle', peer: null, rtt: null, seat: null, myTurn: null, code: null },
@@ -9673,6 +10256,29 @@ window.PoolGame = window.PoolGame || {};
   }
   function netReady() { return !!netObj() || !!mainApi(); }
 
+  // LAN_CONTRACT §3: Net.MODE defaults to 'lan'. A net.js without a MODE at all
+  // predates the switch, and in this build that case is the LAN case too — the
+  // internet path is retained and dormant, not the default.
+  function lanMode() {
+    var n = netObj();
+    return !n || !n.MODE || n.MODE === 'lan';
+  }
+
+  // The standalone HTML somebody was emailed. It has no origin to derive a
+  // relay from, so in LAN mode there is nothing for it to dial.
+  function isFilePage() {
+    try { return window.location.protocol === 'file:'; } catch (e) { return true; }
+  }
+
+  // Where this page was served from, if that is a place a phone could open.
+  function pageOrigin() {
+    try {
+      var loc = window.location;
+      if (!loc || (loc.protocol !== 'http:' && loc.protocol !== 'https:')) return '';
+      return loc.origin || (loc.protocol + '//' + loc.host);
+    } catch (e) { return ''; }
+  }
+
   function playerName() {
     var n = (els.netName && els.netName.value) || lsGet(NAME_KEY, '');
     n = String(n || '').trim().slice(0, 14);
@@ -9693,9 +10299,27 @@ window.PoolGame = window.PoolGame || {};
     if (saved) return saved;
     var n = netObj();
     if (n && n.defaultUrl) {
-      try { return n.defaultUrl(); } catch (e) { /* fall through */ }
+      // LAN mode on a file:// page answers with the empty string on purpose:
+      // there is no host to derive one from. Callers that paste this into a
+      // sentence want a phrase, not a blank, so hand them one — the live
+      // connect path still refuses with NO_HOST rather than dialling this.
+      try {
+        var u = n.defaultUrl();
+        if (u) return u;
+        return NO_HOST_URL;
+      } catch (e) { /* fall through */ }
     }
     return 'ws://localhost:8080';     // only if net.js is missing entirely
+  }
+  var NO_HOST_URL = 'the host machine on your WiFi';
+  // True when this copy has no derivable host: opened as a file rather than
+  // served by the machine running the game. The Same WiFi tab explains how to
+  // start a host instead of offering a Join button that cannot work.
+  function lanOrphan() {
+    var n = netObj();
+    if (!n || n.MODE !== 'lan') return false;
+    if (lsGet(URL_KEY, '')) return false;              // a manual override still works
+    try { return !n.defaultUrl(); } catch (e) { return false; }
   }
   function applyServerUrl() {
     var saved = lsGet(URL_KEY, ''), n = netObj();
@@ -9806,6 +10430,25 @@ window.PoolGame = window.PoolGame || {};
     els.hostRetry.addEventListener('click', function () {
       if (menuLive()) { netCancel(); goHost(netUI.gameId); }
     });
+
+    /* LAN_CONTRACT §4: the code alone is not enough on a LAN — the other player
+       also has to get to the page. The address goes on the host's screen at the
+       same size as the code, with the QR the server drew underneath it. */
+    els.joinBlock = el('div', 'pgui-joinblock', hp);
+    el('div', 'pgui-netcap', els.joinBlock, 'On this WiFi, open');
+    var jrow = el('div', 'pgui-joinrow', els.joinBlock);
+    els.joinAddr = el('div', 'pgui-joinaddr', jrow, '');
+    els.joinQR = el('div', 'pgui-qr', jrow);
+    els.joinQRImg = el('img', null, els.joinQR);
+    els.joinQRImg.alt = 'QR code for the join address';
+    els.joinQRImg.addEventListener('load', function () {
+      if (els.joinQR) els.joinQR.classList.add('pgui-show');
+    });
+    // an older server has no /join.svg — keep the address, drop the picture
+    els.joinQRImg.addEventListener('error', function () {
+      if (els.joinQR) els.joinQR.classList.remove('pgui-show');
+    });
+
     els.hostStatus = el('div', 'pgui-netstatus', hp, '');
     els.hostHint = el('div', 'pgui-nethint', hp, '');
     buildServerLine(hp);
@@ -9929,6 +10572,8 @@ window.PoolGame = window.PoolGame || {};
     if (els.netCopy) els.netCopy.classList.remove('pgui-gone');
     if (els.hostCap) els.hostCap.textContent = 'Room code';
     paintCode(null);
+    // no room yet, so no address to hand out yet
+    if (els.joinBlock) els.joinBlock.classList.remove('pgui-show');
     setNetPanel('host', 'Opening a room on ' + serverUrl() + '…', '', 'busy');
     els.hostHint.innerHTML = '';
 
@@ -9959,11 +10604,17 @@ window.PoolGame = window.PoolGame || {};
       if (token !== netUI.seq) return;
       netUI.code = ((info && info.code) || '').toUpperCase();
       netSeed = info && info.seed;
+      netUI.join = (info && info.join) || '';
       paintCode(netUI.code);
+      paintJoinAddress(netUI.join);
       setNetPanel('host', 'Waiting for your opponent', 'dots', 'busy');
-      els.hostHint.innerHTML = 'Read the code out or send it. They pick <b>2 Player → Online → ' +
-        'Join with a code</b> and type it in. Anyone with the code can take the free seat, ' +
-        'so only share it with the person you mean to play.';
+      els.hostHint.innerHTML = lanMode()
+        ? 'They open that address — scan the code or type it in — then pick <b>2 Player → ' +
+          'Same WiFi → Join with a code</b> and enter the four characters. Anyone on this ' +
+          'network with the code can take the free seat.'
+        : 'Read the code out or send it. They pick <b>2 Player → Same WiFi → ' +
+          'Join with a code</b> and type it in. Anyone with the code can take the free seat, ' +
+          'so only share it with the person you mean to play.';
     }, function (err) {
       if (token !== netUI.seq) return;
       if (!retried && busyRetry(err, function () { goHost(gameId, true); })) return;
@@ -10005,6 +10656,40 @@ window.PoolGame = window.PoolGame || {};
     try { ta.select(); okState = document.execCommand('copy'); } catch (e) { okState = false; }
     if (ta.parentNode) ta.parentNode.removeChild(ta);
     return okState;
+  }
+
+  /* --------------------------------------------- the join address and its QR */
+
+  // `join` is the address the server reported on the hosted payload. It may be
+  // absent — an older server, or one behind a proxy that makes the answer
+  // meaningless — in which case the origin this page was loaded from is the
+  // next best truth. In internet mode the address means nothing to the other
+  // player, so the whole block stays away.
+  function paintJoinAddress(join) {
+    if (!els.joinBlock) return;
+    var addr = String(join || '').trim();
+    if (!addr) addr = pageOrigin();
+    var show = !!addr && lanMode();
+    els.joinBlock.classList.toggle('pgui-show', show);
+    if (!show) {
+      els.joinQR.classList.remove('pgui-show');
+      return;
+    }
+    els.joinAddr.textContent = addr;
+
+    // The server already draws this QR (§1/§2), so fetch it rather than
+    // shipping a second encoder in the client — and it is the machine that
+    // knows which of its addresses the phones are actually on. Prefer our own
+    // origin: on a LAN host the page came from that server, and a same-origin
+    // request cannot be blocked by anything.
+    var base = pageOrigin() || addr;
+    var src = base.replace(/\/+$/, '') + '/join.svg';
+    if (els.joinQRImg.getAttribute('src') !== src) {
+      els.joinQR.classList.remove('pgui-show');    // the load handler shows it
+      els.joinQRImg.setAttribute('src', src);
+    } else if (els.joinQRImg.complete && els.joinQRImg.naturalWidth) {
+      els.joinQR.classList.add('pgui-show');
+    }
   }
 
   function paintCode(code) {
@@ -10130,6 +10815,8 @@ window.PoolGame = window.PoolGame || {};
     // code coming, so the block goes away entirely
     if (els.codeWrap) els.codeWrap.classList.add('pgui-gone');
     if (els.netCopy) els.netCopy.classList.add('pgui-gone');
+    // there is no room, so the address would be inviting people to nothing
+    if (els.joinBlock) els.joinBlock.classList.remove('pgui-show');
     if (els.hostCap) els.hostCap.textContent = 'Could not open a room';
     // nobody is breaking anything — drop the "you are Player 1" promise too
     if (els.hostSub) els.hostSub.textContent = 'Not connected';
@@ -10156,9 +10843,16 @@ window.PoolGame = window.PoolGame || {};
     if (els.tabOnline) els.tabOnline.classList.toggle('on', online);
     if (els.tabOnline) els.tabOnline.classList.toggle('net', online);
     if (els.netBar) els.netBar.classList.toggle('pgui-show', online);
+    // §4: no host to dial from a file:// page — the note replaces the button.
+    // Ask net.js (lanOrphan) rather than testing the protocol here: a file://
+    // page WITH a saved server address is a working setup, and a local
+    // protocol test would hide the Join button on it for no reason.
+    var lanFile = online && lanOrphan();
+    if (els.netJoin) els.netJoin.classList.toggle('pgui-gone', lanFile);
+    if (els.lanNote) els.lanNote.classList.toggle('pgui-show', lanFile);
     if (els.listSub) {
       els.listSub.textContent = online
-        ? 'Online · one player per device'
+        ? 'Same WiFi · one player per device'
         : 'Hotseat · pass the cue between shots';
     }
     for (var i = 0; i < netUI.cards.length; i++) {
@@ -10166,9 +10860,11 @@ window.PoolGame = window.PoolGame || {};
       netUI.cards[i].tag.classList.toggle('net', online);
     }
     if (els.menuFoot && nav.screen === 'list' && nav.cat === 'multi') {
-      els.menuFoot.innerHTML = online
-        ? 'Pick a game to host &nbsp;&middot;&nbsp; or <b>join</b> with your opponent’s code'
-        : 'Pick a game to break &nbsp;&middot;&nbsp; <b>Back</b> returns to the modes';
+      els.menuFoot.innerHTML = lanFile
+        ? 'Start the host on one machine and open the address it prints'
+        : online
+          ? 'Pick a game to host &nbsp;&middot;&nbsp; or <b>join</b> with your opponent’s code'
+          : 'Pick a game to break &nbsp;&middot;&nbsp; <b>Back</b> returns to the modes';
     }
   }
 
@@ -10235,7 +10931,10 @@ window.PoolGame = window.PoolGame || {};
     els.modeTabs = el('div', 'pgui-modetabs', list);
     els.tabLocal = el('div', 'pgui-modetab on', els.modeTabs, 'Same screen');
     els.tabLocal.setAttribute('data-mode', 'local');
-    els.tabOnline = el('div', 'pgui-modetab', els.modeTabs, 'Online');
+    // LAN_CONTRACT §4: this is same-WiFi play now — one machine on the network
+    // serves the page and the relay. `data-mode` stays "online": it is the
+    // internal name for the seat-per-device mode, not a description of the wire.
+    els.tabOnline = el('div', 'pgui-modetab', els.modeTabs, 'Same WiFi');
     els.tabOnline.setAttribute('data-mode', 'online');
     els.tabLocal.addEventListener('click', function () { if (menuLive()) setMultiTab('local'); });
     els.tabOnline.addEventListener('click', function () {
@@ -10260,6 +10959,16 @@ window.PoolGame = window.PoolGame || {};
     els.netJoin.type = 'button';
     els.netJoin.addEventListener('click', function () { if (menuLive()) goJoin(); });
 
+    // LAN_CONTRACT §4: a file:// page in LAN mode has no origin to derive a
+    // relay from, so a Join button here could only ever fail. Say how to start
+    // the host instead — that is the one thing the player can actually do.
+    els.lanNote = el('div', 'pgui-lannote', list);
+    els.lanNote.innerHTML =
+      'This page was opened straight from a file, so there is no game server behind it. ' +
+      'On one computer on this WiFi, run <code>node server/index.js</code> — it prints an ' +
+      'address and a QR code. Open that address on this device and on your opponent’s, ' +
+      'and host from there. <b>Same screen</b> play needs none of this and still works here.';
+
     els.gameGrid = el('div', 'pgui-gamegrid', list);
 
     /* ── screen 3: level / difficulty select ── */
@@ -10278,6 +10987,82 @@ window.PoolGame = window.PoolGame || {};
 
     els.menuFoot = el('div', 'pgui-menu-foot', menu);
     els.menuFoot.innerHTML = MENU_FOOT.home;
+
+    buildInstall(menu);
+  }
+
+  /* ------------------------------------------------- add to home screen */
+  // Only ever visible when there is something real to offer. On a desktop
+  // browser, inside an already-installed copy, on a file:// page or on a LAN
+  // host over plain http, none of this appears at all — and the whole feature
+  // is a no-op rather than a broken button.
+
+  var INSTALL_DISMISS_KEY = 'trueshot.pwa.dismissed';
+
+  function buildInstall(menu) {
+    if (els.installWrap) return;
+    var wrap = el('div', 'pgui-install', menu);
+    els.installWrap = wrap;
+
+    els.installBtn = el('button', 'pgui-installbtn', wrap, 'Add to home screen');
+    els.installBtn.type = 'button';
+    els.installBtn.addEventListener('click', function () {
+      if (!menuLive()) return;
+      var P = window.PoolGame && window.PoolGame.PWA;
+      if (!P) return;
+      P.install().then(function (outcome) {
+        // 'dismissed' is a decision, not a failure. Remember it so the menu
+        // stops asking — a button that reappears after every refusal is the
+        // most reliable way to make someone resent an install prompt.
+        if (outcome !== 'accepted') lsSet(INSTALL_DISMISS_KEY, '1');
+        paintInstall();
+      });
+    });
+
+    els.installHint = el('div', 'pgui-installhint', wrap);
+    els.installHintTx = el('span', null, els.installHint, '');
+    var close = el('button', 'pgui-installx', els.installHint, '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.addEventListener('click', function () {
+      lsSet(INSTALL_DISMISS_KEY, '1');
+      paintInstall();
+    });
+
+    els.updateBar = el('div', 'pgui-update', menu);
+    var utx = el('span', null, els.updateBar, 'A new version is ready.');
+    els.updateBtn = el('button', 'pgui-updatebtn', els.updateBar, 'Reload');
+    els.updateBtn.type = 'button';
+    els.updateBtn.addEventListener('click', function () {
+      var P = window.PoolGame && window.PoolGame.PWA;
+      if (P && P.applyUpdate) P.applyUpdate();
+    });
+    void utx;
+
+    var P = window.PoolGame && window.PoolGame.PWA;
+    if (P && P.onChange) P.onChange(paintInstall);
+    paintInstall();
+  }
+
+  function paintInstall() {
+    if (!els.installWrap) return;
+    var P = window.PoolGame && window.PoolGame.PWA;
+    var st = P && P.status ? P.status() : null;
+    var dismissed = lsGet(INSTALL_DISMISS_KEY, '') === '1';
+    var offer = !!(P && P.canOffer && P.canOffer()) && !dismissed;
+
+    var showBtn = offer && !!(st && st.canPrompt);
+    // iOS has no install API, so the only honest thing is to say where the
+    // button is — and only in Safari, which is the only iOS browser that has
+    // one. Pointing Chrome-on-iOS users at a menu item that does not exist is
+    // worse than staying quiet.
+    var hint = offer && !showBtn && P.iosHint ? P.iosHint() : null;
+
+    els.installBtn.classList.toggle('pgui-gone', !showBtn);
+    els.installHint.classList.toggle('pgui-gone', !hint);
+    if (hint) els.installHintTx.textContent = hint.text;
+    els.installWrap.classList.toggle('pgui-gone', !showBtn && !hint);
+    els.updateBar.classList.toggle('pgui-show', !!(st && st.updateReady));
   }
 
   /* ------------------------------------------------------- category screen */
@@ -10294,7 +11079,12 @@ window.PoolGame = window.PoolGame || {};
     netUI.cards = [];
     // the tab strip belongs to 2-player; solo has its own level pickers
     els.modeTabs.classList.toggle('pgui-show', !solo);
-    if (solo) els.netBar.classList.remove('pgui-show');
+    if (solo) {
+      els.netBar.classList.remove('pgui-show');
+      // the same list screen serves both categories: the LAN note is 2-player
+      // chrome and must not follow the player into the solo games
+      if (els.lanNote) els.lanNote.classList.remove('pgui-show');
+    }
 
     gamesIn(cat).forEach(function (g) {
       var c = el('div', 'pgui-gcard', els.gameGrid);
@@ -10547,13 +11337,22 @@ window.PoolGame = window.PoolGame || {};
     var power = el('div', 'pgui-power pgui-glass', hud);
     els.power = power;
     var track = el('div', 'pgui-power-track', power);
+    els.powerTrack = track;
     el('div', 'pgui-power-grad', track);
     el('div', 'pgui-power-ticks', track);
     els.powerMask = el('div', 'pgui-power-mask', track);
+    // Coarse-mode grab affordance. Present in the DOM in both modes but only
+    // displayed under pg-coarse, so there is no rebuild on a mode flip.
+    els.powerHint = el('div', 'pgui-power-hint', track);
+    el('b', null, els.powerHint, 'PULL');
+    els.powerHint.appendChild(document.createElement('i')).textContent = '▼';
     // No numeric readout. The fill height, the colour ramp and the moving
     // highlight already say how hard the shot is, and a percentage invites
     // players to aim for a number instead of reading the meter.
     el('div', 'pgui-widget-label', power, 'Power');
+    // §4: on a coarse pointer this same widget IS the stroke — armed on
+    // pointerdown, set by the travel down the track, fired on release.
+    bindPowerTouch();
 
     /* spin widget */
     var spinPanel = el('div', 'pgui-spin pgui-glass', hud);
@@ -10636,21 +11435,12 @@ window.PoolGame = window.PoolGame || {};
       if (callbacks && callbacks.onMarkersToggle) callbacks.onMarkersToggle(v);
     });
 
-    // V14: the full list wrapped to three lines at 1024x640, leaving "menu"
-    // alone on the last one. Everything in a `.pgui-opt` span is a secondary
-    // binding and drops out under 1200px, so the shoot loop always fits.
-    // "Esc menu" is now "Esc pause": Escape opens the pause overlay (§1.3, M1)
-    // instead of destroying a timed run outright.
+    // The two hint strings (HINT_FINE / HINT_COARSE) live with the input-mode
+    // code: which one is showing is a property of the pointer in use, not of
+    // the build, and it has to be able to change mid-match.
     var hint = el('div', 'pgui-hint', bot);
     els.hint = hint;
-    var SEP = ' &nbsp;&middot;&nbsp; ';
-    hint.innerHTML =
-      '<b>Move mouse</b> to aim' +
-      '<i class="pgui-opt">' + SEP + '<b>Shift</b> fine aim' + SEP + '<b>&larr; &rarr;</b> nudge' +
-      SEP + '<b>Tab</b> target ball</i>' +
-      SEP + '<b>Hold &amp; drag down</b> for power, release to shoot' +
-      '<i class="pgui-opt">' + SEP + '<b>Scroll</b> zoom' + SEP + '<b>C</b> camera</i>' +
-      SEP + '<b>Esc</b> pause';
+    syncHintText();
 
     /* §1.2 off-screen pocket pointer. Everything is built once here; the
        per-frame call only touches style properties and one text node. */
@@ -10707,6 +11497,7 @@ window.PoolGame = window.PoolGame || {};
       if (els.netTurn) els.netTurn.classList.remove('pgui-on');
       if (els.netFrame) els.netFrame.classList.remove('pgui-on');
       if (els.hint) els.hint.classList.remove('pgui-dim');
+      if (els.tStrip) els.tStrip.classList.remove('pgui-dim');
       return;
     }
 
@@ -10733,6 +11524,8 @@ window.PoolGame = window.PoolGame || {};
     els.netTurn.classList.toggle('pgui-on', theirs);
     els.netFrame.classList.toggle('pgui-on', theirs);
     if (els.hint) els.hint.classList.toggle('pgui-dim', theirs);
+    // the touch strip is inert on their shot (hudLive) — say so
+    if (els.tStrip) els.tStrip.classList.toggle('pgui-dim', theirs);
     if (theirs) {
       els.netTurnText.textContent = (s.peer ? s.peer + ' is shooting' : 'Opponent’s turn');
     }
@@ -10900,6 +11693,10 @@ window.PoolGame = window.PoolGame || {};
       if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
       if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
       if (powerTimer) { clearTimeout(powerTimer); powerTimer = null; }
+      // a hold-repeat that outlived its strip would nudge the aim of the next
+      // match — the elements are gone, the intervals are not
+      destroyTouchStrip();
+      powerDrag.id = null;
       els = {};
       spinState = { side: 0, vert: 0 };
       netUI.tab = 'local';
@@ -10921,6 +11718,14 @@ window.PoolGame = window.PoolGame || {};
       buildMenu(root);
       buildHud(root);
       container.appendChild(root);
+      // §5: the canvas host must not hand a downward drag to the browser as a
+      // scroll or a pull-to-refresh partway through a stroke. Marked here and
+      // switched on by the pg-coarse rule, so the desktop is untouched.
+      if (container.classList) container.classList.add('pgui-touchhost');
+
+      // §1: subscribe to the live pointer mode. Guarded — ui.js is concatenated
+      // before main.js, so PoolGame.Input does not exist yet on this line.
+      bindInputMode();
 
       setSpinDot();
       applyServerUrl();
@@ -11104,6 +11909,9 @@ window.PoolGame = window.PoolGame || {};
       } else {
         els.bih.classList.remove('pgui-on');
       }
+      // §4: the coarse confirm button belongs to the placing state and to
+      // nothing else, and it reads the same field the prompt above does.
+      paintPlaceBtn();
     },
 
     flashMessage: function (text, ms) {
@@ -11138,6 +11946,11 @@ window.PoolGame = window.PoolGame || {};
       if (!els.powerMask) return;
       p = Math.max(0, Math.min(1, p || 0));
       els.powerMask.style.height = ((1 - p) * 100).toFixed(1) + '%';
+      // The grab hint is driven off the POWER, not off the widget's own drag
+      // state, so a stroke armed by any other path — the keyboard, a test hook,
+      // a control added later — still clears it. Otherwise "PULL" sits on top
+      // of a rising fill and reads as a broken overlay.
+      if (els.power) els.power.classList.toggle('pgui-wound', p > 0.004);
       if (powerTimer) { clearTimeout(powerTimer); powerTimer = null; }
       if (p > 0.004) {
         els.power.classList.add('pgui-live');
@@ -11810,7 +12623,7 @@ window.PoolGame = window.PoolGame || {};
       // spin widget in the bottom-right corner; 2.6 m back frames the whole
       // table plus enough of the ghost shooter to read as a person.
       const ca = aimAngle + Math.PI - 0.32;
-      const d = followDist;
+      const d = followDist * portraitPull();
       // height and look-ahead track the distance so close-ups stay well framed
       const hy = 0.42 + (d - 1.60) * 0.46;
       cam.desiredPos.set(cue.x + Math.cos(ca) * d, hy, cue.z + Math.sin(ca) * d);
@@ -11961,6 +12774,25 @@ window.PoolGame = window.PoolGame || {};
   // Aim-camera zoom: scroll wheel pulls in for a closer read on the balls.
   let followDist = 2.30;
   const FOLLOW_MIN = 1.60, FOLLOW_MAX = 3.20;
+
+  // TOUCH_CONTRACT §5 — portrait is a first-class orientation, not an error to
+  // be scolded for. A phone held upright frames a landscape table across the
+  // narrow axis, so the same camera distance that reads well at 16:9 crops the
+  // side rails off at 9:16. Pull back by the aspect shortfall instead of
+  // demanding the player rotate the device.
+  //
+  // Applied as a multiplier on the DESIRED distance rather than by writing
+  // followDist, so it composes with pinch and wheel zoom instead of fighting
+  // them: the player still owns the zoom, they just get a wider starting frame.
+  const PORTRAIT_REF = 1.35;              // below this aspect the table stops fitting
+  const PORTRAIT_PULL_MAX = 1.55;         // hard ceiling on the widening
+  function portraitPull() {
+    var c = Scene.camera;                 // a THREE.PerspectiveCamera, not a getter
+    var aspect = (c && c.aspect) || ((typeof innerWidth !== 'undefined' && innerHeight)
+      ? innerWidth / innerHeight : 16 / 9);
+    if (!(aspect > 0) || aspect >= PORTRAIT_REF) return 1;
+    return Math.min(PORTRAIT_PULL_MAX, PORTRAIT_REF / aspect);
+  }
 
   let camLock = null; // {pos:[x,y,z], look:[x,y,z]} test override
   function updateCamera() {
@@ -14722,13 +15554,157 @@ window.PoolGame = window.PoolGame || {};
         gameId: online.gameId, banner: online.bannerKind
       };
     },
-    configure: function (opts) { const N = net(); return N ? N.configure(opts) : null; }
+    configure: function (opts) { const N = net(); return N ? N.configure(opts) : null; },
+
+    // ── Touch controls (TOUCH_CONTRACT §2) ──
+    // Every one of these is the code path the mouse or the keyboard already
+    // takes, behind the guards those paths already apply. There are no
+    // shortcuts here on purpose: a control that can act on the opponent's turn
+    // authors a move the other client never sees, and that is a lockstep
+    // desync, not a cosmetic bug.
+    powerBegin: function () {
+      if (paused) return false;
+      if (!phys || state === 'menu' || state === 'over') return false;
+      if (netBlocked()) return false;              // opponent's turn / frozen
+      if (state !== 'aim') return false;
+      power = 0;
+      state = 'power';
+      powerFromControl = true;
+      UI.setPowerVisual(0);
+      return true;
+    },
+    powerSet: function (v) {
+      if (paused || state !== 'power') return false;
+      if (netBlocked()) return false;
+      power = Math.min(1, Math.max(0, +v || 0));
+      UI.setPowerVisual(power);
+      return true;
+    },
+    powerRelease: function () {
+      if (paused) return false;          // no stroke may be released into a pause
+      if (state !== 'power') return false;
+      powerFromControl = false;
+      powerDrag = null;
+      // Same unwind as the mouse: a half-wound stroke that became illegal
+      // mid-drag (peer left, turn changed under a resync) lets go, it does not
+      // fire into a turn that is no longer ours.
+      if (netBlocked()) { state = 'aim'; power = 0; UI.setPowerVisual(0); return false; }
+      if (power >= 0.04) { doShoot(); return true; }
+      state = 'aim'; power = 0; UI.setPowerVisual(0);
+      return false;
+    },
+    nudgeAimBy: function (step) {
+      if (paused) return false;
+      if (!phys || state !== 'aim') return false;
+      if (netBlocked()) return false;
+      nudgeAim(+step || 0);
+      return true;
+    },
+    // View-only, exactly like the C key — it stays live for the watcher.
+    cycleCam: function () {
+      if (paused || state === 'menu') return null;
+      const i = CAM_CYCLE.indexOf(cam.mode);
+      const next = CAM_CYCLE[(i + 1) % CAM_CYCLE.length];
+      setCamMode(next);
+      UI.flashMessage(CAM_LABEL[next], 900);
+      return next;
+    },
+    // Tab. snapToNextBall() applies the net / lag guards itself.
+    snapTarget: function () {
+      if (paused) return false;
+      if (!phys || state !== 'aim') return false;
+      if (netBlocked()) return false;
+      snapToNextBall();
+      return true;
+    },
+    // The placing branch of the old mousedown, verbatim, so a touch placement
+    // and a click placement are the same action with the same move number.
+    confirmPlace: function () {
+      if (paused) return false;
+      if (!phys || state !== 'placing') return false;
+      if (netBlocked()) return false;
+      if (online.active && !netCanAct()) return false;   // opponent's ball in hand
+      refreshPlaceValid();
+      if (!placeValid) return false;
+      const act = online.active
+        ? netBeginAction({ kind: 'place', origin: 'local', x: placePos.x, z: placePos.z })
+        : null;
+      commitPlacement(placePos.x, placePos.z, act);
+      return true;
+    },
+  };
+
+  // ── Pointer mode — PoolGame.Input (TOUCH_CONTRACT §1) ────────────────────
+  // One build, two control schemes. The switch is per-INPUT, not per-device:
+  // matchMedia supplies the opening guess and after that the last real pointer
+  // wins, so a 2-in-1 that gets poked mid-frame is coarse until a mouse moves
+  // again — same session, no reload.
+  //
+  // No user-agent sniffing and no width branching. A 1024 px touchscreen and a
+  // 1024 px window on a desktop report the same number and are not the same
+  // machine; `pointerType` is the only signal that is actually about the device
+  // the player has their hand on.
+  let inputMode = 'fine';
+  try {
+    if (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) inputMode = 'coarse';
+  } catch (e) { /* no matchMedia (headless shims): 'fine' is the safe default */ }
+  const inputSubs = [];
+
+  // ui.js hangs every layout difference off this class, so exactly one of the
+  // two is present at any moment — never both, never neither.
+  function mirrorInputClass() {
+    const b = document.body;
+    if (!b || !b.classList) return;     // boot() calls again once the body exists
+    b.classList.toggle('pg-coarse', inputMode === 'coarse');
+    b.classList.toggle('pg-fine', inputMode !== 'coarse');
+  }
+  mirrorInputClass();
+
+  function setInputMode(m) {
+    const next = m === 'coarse' ? 'coarse' : 'fine';
+    if (next === inputMode) return inputMode;   // §1: transitions only
+    inputMode = next;
+    mirrorInputClass();
+    // A mode flip mid-gesture leaves the other scheme's drag armed. Drop the
+    // touch bookkeeping and any orbit rather than let half a pinch survive into
+    // a mouse session. An armed STROKE is deliberately left alone: the player
+    // wound it on purpose and a silent unwind reads as a dropped input.
+    endTouchGestures();
+    orbitDrag = null;
+    for (const fn of inputSubs.slice()) {
+      try { fn(inputMode); } catch (e) { /* a bad subscriber must not kill input */ }
+    }
+    return inputMode;
+  }
+
+  function noteInputType(t) {
+    if (t === 'touch') setInputMode('coarse');
+    else if (t === 'mouse' || t === 'pen') setInputMode('fine');
+    // anything else (a synthetic event with no pointerType) leaves it alone
+  }
+
+  PoolGame.Input = {
+    get mode() { return inputMode; },
+    onChange: function (fn) {
+      if (typeof fn !== 'function') return function () {};
+      inputSubs.push(fn);
+      return function () {
+        const i = inputSubs.indexOf(fn);
+        if (i >= 0) inputSubs.splice(i, 1);
+      };
+    },
+    // Test hook only. Fires onChange on a real transition, same as a pointer.
+    set: function (m) { return setInputMode(m); },
   };
 
   // ── Input ──
   let powerDrag = null; // {startY, startAngle}
   let orbitDrag = null; // {sx, sy, th, ph}
   let lastMoveX = null;
+  // A stroke wound by the on-screen power control rather than by a cursor
+  // dragged down the table: the vertical edge steer must keep its hands off it,
+  // or the widget and the edge fight each other over the same `power`.
+  let powerFromControl = false;
 
   // Aiming is RELATIVE, not "point at the table spot under the cursor".
   // The follow camera orbits with the aim, so absolute pointing created a
@@ -14737,6 +15713,19 @@ window.PoolGame = window.PoolGame || {};
   // it spinning. Relative input breaks the loop completely.
   const AIM_SENS = 0.0032;        // radians per pixel (~180° per 980 px)
   const AIM_FINE = 0.22;          // Shift multiplier for fine aim
+
+  // Touch aim is deliberately slower than mouse aim (§3). A fingertip covers
+  // roughly a centimetre of glass and the digitiser reports its centroid, which
+  // creeps: at AIM_SENS a "steady" finger wanders about four degrees, and four
+  // degrees is a missed pot at any distance worth taking.
+  const AIM_SENS_TOUCH = AIM_SENS * 0.55;
+  const TOUCH_PLACE_LIFT = 44;    // px of screen the ghost sits ABOVE the finger
+  const TAP_SLOP = 10;            // px — inside this and under TAP_MS it is a tap
+  const TAP_MS = 250;
+  // A pinch travels ~200 px where the wheel would report thousands of deltaY,
+  // so the pixels are geared up before they go through the wheel's OWN
+  // coefficients and clamps — one zoom range, two ways to drive it.
+  const PINCH_GAIN = 3.4;
   let aimTarget = Math.PI;        // where the player is steering
   let fineAim = false;
 
@@ -14762,6 +15751,10 @@ window.PoolGame = window.PoolGame || {};
 
   function edgeSteer(dt) {
     edgeRate = 0;
+    // Coarse mode has no cursor to run out of desk with (§3): the last touch
+    // position is wherever the finger was lifted, and steering from it means
+    // the aim creeps while nobody is touching the glass.
+    if (inputMode === 'coarse') return;
     if (state !== 'aim' || !cursorIn || cursorX == null) return;
     if (netBlocked()) return;           // the watcher's aim must not drift
     const w = container.clientWidth || 1;
@@ -14782,6 +15775,10 @@ window.PoolGame = window.PoolGame || {};
   // the top edge keeps easing it back off.
   function powerEdgeSteer(dt) {
     powerEdgeRate = 0;
+    if (inputMode === 'coarse') return;           // goes with the aim edge (§3)
+    // The stroke belongs to the power widget; the cursor sitting over it near
+    // the bottom of the screen is not the player pulling back on the table.
+    if (powerFromControl) return;
     if (state !== 'power' || !cursorIn || cursorY == null) return;
     if (netBlocked()) return;
     const h = container.clientHeight || 1;
@@ -14917,6 +15914,10 @@ window.PoolGame = window.PoolGame || {};
   function onMouseUp(e) {
     if (paused) return;                // no stroke may be released into a pause
     if (orbitDrag && e.button === 2) { orbitDrag = null; return; }
+    // A stroke armed by the power widget is released by the widget's own
+    // pointerup (Main.powerRelease). Firing it from here too would run the
+    // shot down two paths on one release.
+    if (powerFromControl) return;
     if (state === 'power' && e.button === 0) {
       powerDrag = null;
       // A half-wound stroke that became illegal mid-drag (peer left, turn
@@ -14925,6 +15926,231 @@ window.PoolGame = window.PoolGame || {};
       if (power >= 0.04) doShoot();
       else { state = 'aim'; power = 0; UI.setPowerVisual(0); }
     }
+  }
+
+  // ── Touch gestures (TOUCH_CONTRACT §3) ───────────────────────────────────
+  // Active pointers are tracked in a Map keyed by pointerId, because a phone
+  // sends a stream of moves for several ids at once and "the last event" is not
+  // enough to tell a one-finger aim from a two-finger pinch.
+  const touchPts = new Map();   // pointerId -> {x, y, sx, sy, ax, t0, moved}
+  let touchOne = null;          // the id currently steering aim / the ghost
+  let twoDrag = null;           // {cx, cy, spread, th, ph, dist, follow, lift, orbiting}
+  let touchLock = false;        // a 2-finger gesture happened: leftovers are inert
+  let lastGesture = null;       // what the last gesture resolved to (test/touch.js)
+
+  function endTouchGestures() {
+    touchPts.clear();
+    touchOne = null;
+    twoDrag = null;
+    touchLock = false;
+  }
+
+  function twoPts() {
+    const out = [];
+    touchPts.forEach(function (p) { if (out.length < 2) out.push(p); });
+    return out.length === 2 ? out : null;
+  }
+
+  function spreadOf(a) {
+    const dx = a[0].x - a[1].x, dy = a[0].y - a[1].y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // Ball in hand: the ghost sits TOUCH_PLACE_LIFT px of screen above the
+  // fingertip, because a finger on the spot is a finger covering the spot.
+  // Baking the lift into cursorY (rather than into placePos) means frame()'s
+  // per-frame re-derivation — which exists because the overview camera is still
+  // easing in — keeps the same offset instead of snapping the ghost back down.
+  function touchPlace(p) {
+    const r = container.getBoundingClientRect();
+    cursorX = p.x - r.left;
+    cursorY = p.y - r.top - TOUCH_PLACE_LIFT;
+    cursorIn = true;
+    const pt = screenToTable(cursorX, cursorY);
+    if (pt) { placePos = pt; refreshPlaceValid(); }
+    lastGesture = { kind: 'place', x: placePos.x, z: placePos.z, valid: placeValid };
+  }
+
+  function beginTwoDrag() {
+    const a = twoPts();
+    if (!a) return;
+    twoDrag = {
+      cx: (a[0].x + a[1].x) / 2, cy: (a[0].y + a[1].y) / 2, spread: spreadOf(a),
+      th: cam.theta, ph: cam.phi,
+      dist: cam.dist, follow: followDist, lift: fpLift,
+      orbiting: false,
+    };
+  }
+
+  function touchDown(e) {
+    if (paused) return;
+    if (!phys || state === 'menu' || state === 'over') return;
+    const p = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY,
+                ax: e.clientX, t0: performance.now(), moved: false };
+    touchPts.set(e.pointerId, p);
+    if (touchPts.size === 1) {
+      touchOne = e.pointerId;
+      touchLock = false;
+      // The ghost goes to the first touch immediately; the player is pointing
+      // at a spot, not dragging a handle they cannot see yet.
+      if (state === 'placing' && !netBlocked()) touchPlace(p);
+    } else if (touchPts.size === 2) {
+      touchOne = null;
+      touchLock = true;
+      beginTwoDrag();
+    } else {
+      touchOne = null;
+      twoDrag = null;             // three fingers is not a gesture we own
+    }
+  }
+
+  function touchMove(e) {
+    const p = touchPts.get(e.pointerId);
+    if (!p) return;               // a pointer that started on the HUD, not the cloth
+    p.x = e.clientX; p.y = e.clientY;
+    if (!p.moved && (Math.abs(p.x - p.sx) > TAP_SLOP || Math.abs(p.y - p.sy) > TAP_SLOP)) {
+      p.moved = true;
+      // Accumulate from HERE, not from touchdown: the slop is the part of the
+      // movement the player did not mean, and replaying it as aim is a jump.
+      p.ax = p.x;
+    }
+    if (paused) return;
+    if (!phys || state === 'menu' || state === 'over') return;
+    if (touchPts.size >= 2) { twoMove(); return; }
+    if (touchLock || e.pointerId !== touchOne) return;
+    // Aim and ball-in-hand are dead on the opponent's turn. The two-finger
+    // camera above deliberately is not — watching is not acting.
+    if (netBlocked()) return;
+    if (state === 'aim') {
+      if (!p.moved) return;
+      const dx = p.x - p.ax;
+      p.ax = p.x;
+      aimTarget += dx * AIM_SENS_TOUCH;
+      lastGesture = { kind: 'aim', dx: dx };
+    } else if (state === 'placing') {
+      touchPlace(p);
+    }
+  }
+
+  function twoMove() {
+    const a = twoPts();
+    if (!a || !twoDrag) return;
+    const cx = (a[0].x + a[1].x) / 2, cy = (a[0].y + a[1].y) / 2;
+    const spread = spreadOf(a);
+    // Pinch is the wheel by another name: the same three branches, the same
+    // coefficients, the same clamps. Deltas run off the values captured when
+    // the gesture began so a slow pinch cannot drift by accumulation.
+    const dz = (twoDrag.spread - spread) * PINCH_GAIN;
+    if (cam.mode === 'orbit') {
+      cam.dist = Math.min(4.5, Math.max(1.1, twoDrag.dist + dz * 0.0018));
+    } else if (cam.mode === 'follow') {
+      followDist = Math.min(FOLLOW_MAX, Math.max(FOLLOW_MIN, twoDrag.follow + dz * 0.0016));
+    } else if (cam.mode === 'fp') {
+      fpLift = Math.min(FP_LIFT_MAX, Math.max(0, twoDrag.lift + dz * 0.00055));
+    }
+    // Orbit only once the centroid has actually travelled AND has travelled
+    // further than the fingers have spread. The second half of that test is not
+    // optional: a screen reports one pointer per event, so the first move of a
+    // pinch is one finger travelling alone, which drags the centroid half that
+    // distance and would otherwise read as a swipe. Fingers moving together
+    // shift the centroid and leave the spread alone; fingers moving apart do
+    // the opposite.
+    const travel = Math.abs(cx - twoDrag.cx) + Math.abs(cy - twoDrag.cy);
+    if (!twoDrag.orbiting && travel > TAP_SLOP && travel > Math.abs(twoDrag.spread - spread)) {
+      setCamMode('orbit');        // seeds theta/phi/dist from the live pose
+      twoDrag.orbiting = true;
+      twoDrag.th = cam.theta; twoDrag.ph = cam.phi; twoDrag.dist = cam.dist;
+      twoDrag.cx = cx; twoDrag.cy = cy; twoDrag.spread = spread;
+    }
+    if (twoDrag.orbiting) {
+      // identical maths to the right-drag orbit, centroid instead of cursor
+      const dx = (cx - twoDrag.cx) / 300, dy = (cy - twoDrag.cy) / 300;
+      cam.theta = twoDrag.th + dx;
+      cam.phi = Math.min(1.45, Math.max(0.12, twoDrag.ph - dy));
+    }
+    lastGesture = { kind: twoDrag.orbiting ? 'orbit' : 'pinch', spread: spread,
+                    dist: cam.dist, follow: followDist };
+  }
+
+  function touchUp(e) {
+    const p = touchPts.get(e.pointerId);
+    if (!p) return;
+    touchPts.delete(e.pointerId);
+    if (touchPts.size < 2) twoDrag = null;
+    if (touchPts.size) {
+      // A finger left over from a pinch keeps the lock until the hand is off
+      // the glass: otherwise lifting one of two fingers swings the aim.
+      touchOne = null;
+      return;
+    }
+    const held = performance.now() - p.t0;
+    if (!p.moved && held < TAP_MS && !touchLock) {
+      // §3: a tap on the cloth in 'aim' does NOTHING. Shots are fired from the
+      // power control; tapping the table to shoot turns every camera
+      // adjustment and every mis-grab into a misfire.
+      lastGesture = { kind: 'tap', state: state, ms: Math.round(held) };
+    }
+    touchOne = null;
+    touchLock = false;
+  }
+
+  // ── Pointer routing (TOUCH_CONTRACT §2) ──────────────────────────────────
+  // The mouse path below the split is what it always was — same movementX
+  // accumulation, same power drag, same edge steering, same right-drag orbit —
+  // because the regression bar is the existing gameplay tests passing untouched.
+  function coarseEvent(e) {
+    if (e.pointerType === 'touch') return true;
+    if (e.pointerType === 'mouse' || e.pointerType === 'pen') return false;
+    // No pointerType at all: a synthetic event from a harness. Follow the mode.
+    return inputMode === 'coarse';
+  }
+
+  // Only the cloth starts a gesture. ui.js shields its controls by stopping
+  // `mousedown`, which does exactly nothing to a `pointerdown` — without this
+  // guard every HUD button press would also arm a stroke on the table under it.
+  function fromCanvas(e) {
+    const t = e.target;
+    if (!t || t === container) return true;
+    return typeof t.tagName === 'string' && t.tagName.toUpperCase() === 'CANVAS';
+  }
+
+  // Mode detection is separate from gesture routing and runs on window in the
+  // capture phase, because ui.js stops `pointerdown` on its own controls: the
+  // first thing a phone player touches is often a HUD button, and that has to
+  // count as a real input or the layout stays in fine mode under their thumb.
+  function onPointerProbe(e) { noteInputType(e.pointerType); }
+
+  function onPointerDown(e) {
+    noteInputType(e.pointerType);
+    if (!fromCanvas(e)) return;
+    if (coarseEvent(e)) touchDown(e);
+    else onMouseDown(e);
+  }
+
+  function onPointerMove(e) {
+    if (coarseEvent(e)) { touchMove(e); return; }
+    // NOT filtered by target: mousemove bubbled from the HUD too, and the aim
+    // has always kept moving while the cursor crosses it.
+    onMouseMove(e);
+  }
+
+  // Bound on window in the CAPTURE phase. `mouseup` was a window listener that
+  // nothing could stop; ui.js does stop `pointerup` on the spin ball, so
+  // capturing is what keeps "a release always ends the drag" true.
+  function onPointerUp(e) {
+    if (touchPts.has(e.pointerId)) { touchUp(e); return; }
+    if (coarseEvent(e)) return;
+    onMouseUp(e);
+  }
+
+  // Synthetic pointer for the headless harness: goes through the real routing,
+  // so a test cannot pass against a path the browser never takes.
+  function synthPointer(x, y, id, type) {
+    return {
+      pointerId: id == null ? 1 : id, pointerType: type || 'touch',
+      clientX: x, clientY: y, button: 0, buttons: 1,
+      target: container, preventDefault: function () {},
+    };
   }
 
   function onWheel(e) {
@@ -15112,6 +16338,19 @@ window.PoolGame = window.PoolGame || {};
   }
   function updateEdgeCue() {
     ensureEdgeCue();
+    // The chrome advertises edge steering, and edge steering is off in coarse
+    // mode (§3). Four glowing arrows for a control that does nothing is worse
+    // than no arrows: display:none rather than opacity 0 so nothing of it is
+    // left sitting over the table.
+    if (inputMode === 'coarse') {
+      edgeCueL.style.display = edgeCueR.style.display = 'none';
+      edgeCueB.style.display = edgeCueT.style.display = 'none';
+      return;
+    }
+    if (edgeCueL.style.display === 'none') {
+      edgeCueL.style.display = edgeCueR.style.display = 'flex';
+      edgeCueB.style.display = edgeCueT.style.display = 'flex';
+    }
     const mag = Math.min(1, Math.abs(edgeRate) / EDGE_MAX_RATE);
     edgeCueL.style.opacity = edgeRate < 0 ? String(0.35 + mag * 0.65) : '0';
     edgeCueR.style.opacity = edgeRate > 0 ? String(0.35 + mag * 0.65) : '0';
@@ -15274,9 +16513,16 @@ window.PoolGame = window.PoolGame || {};
     netBind();                          // safe with or without a live match
     netPushStatus();
     UI.showMenu();
-    container.addEventListener('mousemove', onMouseMove);
-    container.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mouseup', onMouseUp);
+    mirrorInputClass();                 // the body exists by now even if it did not at load
+    // Without this the browser claims the drag for a scroll or a pull-to-refresh
+    // partway through a stroke and the gesture simply stops arriving (§5).
+    container.style.touchAction = 'none';
+    window.addEventListener('pointerdown', onPointerProbe, true);
+    container.addEventListener('pointermove', onPointerMove);
+    container.addEventListener('pointerdown', onPointerDown);
+    // capture phase: see onPointerUp — a release must always end the drag
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerUp, true);
     container.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', (e) => {
@@ -15285,11 +16531,16 @@ window.PoolGame = window.PoolGame || {};
     });
     window.addEventListener('blur', () => {
       fineAim = false; orbitDrag = null; cursorIn = false; heldKeys.clear();
+      // A backgrounded tab never delivers the pointerup, so the fingers would
+      // still be "down" when the player comes back.
+      endTouchGestures();
     });
     // Coming back from a hidden tab must not bill the player for the time they
     // were away: drop the stamp so the next frame starts a fresh interval.
     document.addEventListener('visibilitychange', () => { chLastT = 0; });
-    // stop steering when the pointer leaves the view entirely
+    // Stop steering when the pointer leaves the view entirely. Deliberately
+    // still MOUSE enter/leave: pointerleave fires every time a finger lifts,
+    // which would drop cursorIn in the middle of a ball-in-hand placement.
     container.addEventListener('mouseleave', () => { cursorIn = false; });
     container.addEventListener('mouseenter', () => { cursorIn = true; });
     container.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -15357,6 +16608,54 @@ window.PoolGame = window.PoolGame || {};
     setCursorX(x) { cursorX = x; cursorIn = true; },
     setCursorY(y) { cursorY = y; cursorIn = true; },
     setCursorIn(v) { cursorIn = !!v; },
+
+    // ── pointer mode + touch gestures (TOUCH_CONTRACT §1-§3) ───────────────
+    // test/touch.js drives a whole shot through these and compares the result
+    // against the same aim and power taken through the mouse path, so they go
+    // through the real routing rather than calling the gesture handlers direct.
+    input: PoolGame.Input,
+    touch: {
+      get mode() { return inputMode; },
+      set(m) { return setInputMode(m); },                  // forces a mode
+      get bodyClass() { return document.body ? (document.body.className || '') : ''; },
+      get pointers() {
+        const out = [];
+        touchPts.forEach(function (p, id) {
+          out.push({ id: id, x: p.x, y: p.y, moved: p.moved });
+        });
+        return out;
+      },
+      get last() { return lastGesture ? JSON.parse(JSON.stringify(lastGesture)) : null; },
+      clearLast() { lastGesture = null; },
+      // Synthetic pointers, targeted at the canvas. `type` defaults to 'touch',
+      // so passing 'mouse' drives the fine path through the same entry point.
+      down(x, y, id, type) { onPointerDown(synthPointer(x, y, id, type)); return lastGesture; },
+      move(x, y, id, type) { onPointerMove(synthPointer(x, y, id, type)); return lastGesture; },
+      up(x, y, id, type) { onPointerUp(synthPointer(x, y, id, type)); return lastGesture; },
+      cancel(id, type) {
+        const p = touchPts.get(id == null ? 1 : id);
+        onPointerUp(synthPointer(p ? p.x : 0, p ? p.y : 0, id, type));
+        return lastGesture;
+      },
+      // The §2 methods, mirrored so a harness only has to hold one object.
+      powerBegin() { return PoolGame.Main.powerBegin(); },
+      powerSet(v) { return PoolGame.Main.powerSet(v); },
+      powerRelease() { return PoolGame.Main.powerRelease(); },
+      nudgeAimBy(s) { return PoolGame.Main.nudgeAimBy(s); },
+      cycleCam() { return PoolGame.Main.cycleCam(); },
+      snapTarget() { return PoolGame.Main.snapTarget(); },
+      confirmPlace() { return PoolGame.Main.confirmPlace(); },
+      get powerFromControl() { return powerFromControl; },
+      get edgeCueShown() {
+        return !!edgeCueL && edgeCueL.style.display !== 'none';
+      },
+      consts: {
+        AIM_SENS: AIM_SENS, AIM_SENS_TOUCH: AIM_SENS_TOUCH,
+        TOUCH_PLACE_LIFT: TOUCH_PLACE_LIFT, TAP_SLOP: TAP_SLOP, TAP_MS: TAP_MS,
+        PINCH_GAIN: PINCH_GAIN,
+      },
+    },
+
     get edgeRate() { return edgeRate; },
     get powerEdgeRate() { return powerEdgeRate; },
     get power() { return power; },
@@ -15693,6 +16992,208 @@ window.PoolGame = window.PoolGame || {};
       };
     },
   };
+})();
+
+
+// ═══════ src/pwa.js ═══════
+/* ══════════ PWA: home screen, offline, update ══════════
+ *
+ * Everything in here is additive and optional. The single self-contained HTML
+ * that gets emailed around, and the copy served off a LAN host over plain
+ * http, must behave exactly as they did before this file existed — so every
+ * entry point below no-ops unless it is running from a secure origin that
+ * actually shipped a service worker beside it.
+ *
+ * Requires: nothing. Registers itself after load. Exposes PoolGame.PWA.
+ */
+(function () {
+  'use strict';
+
+  var PoolGame = window.PoolGame = window.PoolGame || {};
+
+  var state = {
+    supported: false,      // secure origin + SW API present
+    registered: false,
+    installed: false,      // running from the home screen right now
+    canPrompt: false,      // Android/desktop gave us a real install prompt
+    platform: 'other',     // 'ios' | 'android' | 'other'
+    updateReady: false,
+  };
+  var deferredPrompt = null;
+  var reg = null;
+  var listeners = [];
+
+  function emit() {
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](snapshot()); } catch (e) { /* a bad listener is not our problem */ }
+    }
+  }
+  function snapshot() {
+    return {
+      supported: state.supported, registered: state.registered,
+      installed: state.installed, canPrompt: state.canPrompt,
+      platform: state.platform, updateReady: state.updateReady,
+    };
+  }
+
+  // A service worker needs a secure context. localhost counts; a LAN IP over
+  // plain http does not, and neither does file://. This is a browser rule, not
+  // a setting — see LAN_CONTRACT §5 for why we are not working around it with
+  // a self-signed certificate.
+  function secure() {
+    try {
+      if (window.isSecureContext === false) return false;
+      var p = location.protocol;
+      if (p === 'https:') return true;
+      return p === 'http:' && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+    } catch (e) { return false; }
+  }
+
+  function detectPlatform() {
+    var ua = '';
+    try { ua = navigator.userAgent || ''; } catch (e) { return 'other'; }
+    // Deliberately UA-based, and this is the one place it is correct: the
+    // question is not "what can this device do" (feature detection answers
+    // that) but "which vendor's install ritual do I have to describe to the
+    // person". That is a vendor question and only the vendor string answers it.
+    var iOSLike = /iPad|iPhone|iPod/.test(ua) ||
+      // iPadOS reports as a Mac; a Mac with a touchscreen does not exist.
+      (/Macintosh/.test(ua) && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1);
+    if (iOSLike) return 'ios';
+    if (/Android/.test(ua)) return 'android';
+    return 'other';
+  }
+
+  function isStandalone() {
+    try {
+      if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+      if (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches) return true;
+      return navigator.standalone === true;          // the iOS-only flag
+    } catch (e) { return false; }
+  }
+
+  function register() {
+    if (!secure()) return;
+    if (!('serviceWorker' in navigator)) return;
+    // The manifest link is the marker that this copy was deployed WITH its
+    // siblings. The standalone single file ships without one on purpose, and
+    // the LAN host serves that same standalone file — so registering on every
+    // secure origin meant every LAN game on localhost tried to fetch an sw.js
+    // that was never deployed and logged a 404 to the console of both players.
+    // Presence of the manifest is the only honest signal that sw.js is there.
+    if (!document.querySelector('link[rel="manifest"]')) return;
+    state.supported = true;
+    navigator.serviceWorker.register('sw.js', { scope: './' }).then(function (r) {
+      reg = r;
+      state.registered = true;
+      emit();
+      // An update found later in the session must NOT take over: the running
+      // page may be mid-match against an opponent on the old build. Flag it and
+      // let the player choose, and let the default path be "next cold start".
+      r.addEventListener('updatefound', function () {
+        var w = r.installing;
+        if (!w) return;
+        w.addEventListener('statechange', function () {
+          if (w.state === 'installed' && navigator.serviceWorker.controller) {
+            state.updateReady = true;
+            emit();
+          }
+        });
+      });
+    }).catch(function () {
+      // A 404 on sw.js is the normal case for the single-file build being
+      // hosted somewhere without its siblings. Not an error worth showing.
+      state.registered = false;
+    });
+  }
+
+  var PWA = {
+    status: snapshot,
+
+    onChange: function (fn) {
+      if (typeof fn !== 'function') return function () {};
+      listeners.push(fn);
+      try { fn(snapshot()); } catch (e) { /* ignore */ }
+      return function () {
+        var i = listeners.indexOf(fn);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    },
+
+    // True when there is something useful to offer the player: a real prompt
+    // on Android, or the manual route on iOS, and they are not already
+    // installed. The UI asks this rather than sniffing anything itself.
+    canOffer: function () {
+      if (state.installed) return false;
+      if (state.canPrompt) return true;
+      return state.platform === 'ios' && state.supported;
+    },
+
+    // Android and desktop: fires the browser's own install dialog. Returns a
+    // promise for 'accepted' | 'dismissed' | 'unavailable'.
+    install: function () {
+      if (!deferredPrompt) return Promise.resolve('unavailable');
+      var p = deferredPrompt;
+      deferredPrompt = null;
+      state.canPrompt = false;
+      emit();
+      try {
+        p.prompt();
+        return p.userChoice.then(function (c) {
+          return (c && c.outcome) || 'dismissed';
+        }).catch(function () { return 'dismissed'; });
+      } catch (e) { return Promise.resolve('unavailable'); }
+    },
+
+    // iOS has no install API at all, so the only honest thing is to describe
+    // where the button is. Safari only: Chrome and Firefox on iOS cannot add a
+    // web app to the home screen, and telling their users to look for a menu
+    // item that is not there is worse than saying nothing.
+    iosHint: function () {
+      var ua = '';
+      try { ua = navigator.userAgent || ''; } catch (e) {}
+      if (state.platform !== 'ios') return null;
+      if (/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)) {
+        return { safari: false, text: 'Open this page in Safari to add it to your home screen.' };
+      }
+      return { safari: true, text: 'Tap Share, then Add to Home Screen.' };
+    },
+
+    applyUpdate: function () {
+      if (!reg || !reg.waiting) return false;
+      try { reg.waiting.postMessage('tsb-skip-waiting'); } catch (e) { return false; }
+      var reloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (reloaded) return;
+        reloaded = true;
+        location.reload();
+      });
+      return true;
+    },
+  };
+
+  state.platform = detectPlatform();
+  state.installed = isStandalone();
+
+  try {
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();                 // keep the mini-infobar off the table
+      deferredPrompt = e;
+      state.canPrompt = true;
+      emit();
+    });
+    window.addEventListener('appinstalled', function () {
+      state.installed = true;
+      state.canPrompt = false;
+      deferredPrompt = null;
+      emit();
+    });
+  } catch (e) { /* pre-historic browser; the game still plays */ }
+
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register);
+
+  PoolGame.PWA = PWA;
 })();
 
 </script>
