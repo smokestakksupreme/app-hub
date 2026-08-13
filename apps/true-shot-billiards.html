@@ -7440,6 +7440,190 @@ window.PoolGame = window.PoolGame || {};
 })();
 
 
+// ═══════ src/fullscreen.js ═══════
+/* ══════════ Full screen, and the landscape lock that goes with it ══════════
+ *
+ * Exposes PoolGame.FullScreen. Nothing here is required for the game to run —
+ * every entry point degrades to a no-op and reports `supported() === false`,
+ * which is what the UI reads to decide whether to offer the control at all.
+ * An offered button that cannot work is worse than no button.
+ *
+ * The one platform worth naming: iPhone Safari has no Fullscreen API for
+ * arbitrary elements, at all. There is no flag and no workaround. The iPhone
+ * route to a full screen is adding the game to the home screen, which the PWA
+ * layer already offers, so this module simply reports unsupported there and
+ * gets out of the way.
+ */
+(function () {
+  'use strict';
+
+  var PoolGame = window.PoolGame = window.PoolGame || {};
+
+  var listeners = [];
+  var wantLandscape = false;      // the user asked for the lock, not that it took
+  var locked = false;             // the lock is actually applied right now
+
+  var doc = document;
+  var el = doc.documentElement;
+
+  function req() {
+    return el.requestFullscreen || el.webkitRequestFullscreen ||
+      el.mozRequestFullScreen || el.msRequestFullscreen || null;
+  }
+  function exitFn() {
+    return doc.exitFullscreen || doc.webkitExitFullscreen ||
+      doc.mozCancelFullScreen || doc.msExitFullscreen || null;
+  }
+  function current() {
+    return doc.fullscreenElement || doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement || doc.msFullscreenElement || null;
+  }
+
+  function supported() {
+    // fullscreenEnabled is false inside an iframe that was not granted the
+    // permission, which is a real deployment (someone embedding the game) and
+    // the button must not appear there either.
+    var enabled = doc.fullscreenEnabled;
+    if (enabled === undefined) enabled = doc.webkitFullscreenEnabled;
+    if (enabled === undefined) enabled = doc.msFullscreenEnabled;
+    if (enabled === false) return false;
+    return !!req();
+  }
+
+  function active() { return !!current(); }
+
+  function emit() {
+    var s = status();
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i](s); } catch (e) { /* a bad listener is not our problem */ }
+    }
+  }
+
+  function status() {
+    return {
+      supported: supported(),
+      active: active(),
+      landscapeWanted: wantLandscape,
+      landscapeLocked: locked,
+    };
+  }
+
+  /* ── orientation lock ──────────────────────────────────────────────────────
+   * A pool table is landscape and a phone usually is not. Locking is only
+   * possible while full screen, only on Android in practice, and the promise
+   * rejects on every desktop browser and on iOS. That rejection is EXPECTED and
+   * must be swallowed: an unhandled rejection here would surface as a console
+   * error on the majority of devices for a feature that is working correctly.
+   */
+  function lockLandscape() {
+    if (!wantLandscape) return;
+    var so = window.screen && window.screen.orientation;
+    if (!so || typeof so.lock !== 'function') return;
+    try {
+      var p = so.lock('landscape');
+      if (p && p.then) p.then(function () { locked = true; emit(); },
+        function () { locked = false; /* expected off Android */ });
+    } catch (e) { locked = false; }
+  }
+
+  function unlockOrientation() {
+    if (!locked) return;
+    var so = window.screen && window.screen.orientation;
+    locked = false;
+    if (!so || typeof so.unlock !== 'function') return;
+    try { so.unlock(); } catch (e) { /* ignore */ }
+  }
+
+  function enter() {
+    var fn = req();
+    if (!fn) return Promise.resolve(false);
+    try {
+      // Must be called from a user gesture. Every caller in this codebase is a
+      // click handler; there is deliberately no "restore on load" path, because
+      // the browser would reject it and the rejection is indistinguishable from
+      // a real failure.
+      var p = fn.call(el, { navigationUI: 'hide' });
+      if (p && p.then) {
+        return p.then(function () { lockLandscape(); return true; },
+          function () { return false; });
+      }
+      lockLandscape();                 // old prefixed APIs return undefined
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+
+  function exit() {
+    var fn = exitFn();
+    unlockOrientation();
+    if (!fn || !active()) return Promise.resolve(false);
+    try {
+      var p = fn.call(doc);
+      if (p && p.then) return p.then(function () { return true; }, function () { return false; });
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+
+  function toggle() { return active() ? exit() : enter(); }
+
+  // The browser can leave full screen without us: Escape, the back gesture, a
+  // tab switch on some platforms. The UI has to follow that rather than keep
+  // showing a switch that says ON.
+  ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']
+    .forEach(function (evt) {
+      try {
+        doc.addEventListener(evt, function () {
+          if (!active()) unlockOrientation();
+          else lockLandscape();
+          emit();
+        });
+      } catch (e) { /* ignore */ }
+    });
+
+  PoolGame.FullScreen = {
+    supported: supported,
+    active: active,
+    status: status,
+    enter: enter,
+    exit: exit,
+    toggle: toggle,
+
+    // Whether to pin landscape while full screen. Remembered by the UI, not
+    // here — this module holds no storage.
+    setLandscape: function (on) {
+      wantLandscape = !!on;
+      if (!wantLandscape) unlockOrientation();
+      else if (active()) lockLandscape();
+      emit();
+      return wantLandscape;
+    },
+    landscape: function () { return wantLandscape; },
+
+    // True only where locking could actually happen: a coarse pointer (a phone
+    // or tablet, not a desktop with a small window) and a browser that has the
+    // API. Used to decide whether the option is worth showing.
+    canLockOrientation: function () {
+      var so = window.screen && window.screen.orientation;
+      if (!so || typeof so.lock !== 'function') return false;
+      try {
+        var I = PoolGame.Input;
+        if (I && I.mode) return I.mode === 'coarse';
+        return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+      } catch (e) { return false; }
+    },
+
+    onChange: function (fn) {
+      if (typeof fn !== 'function') return function () {};
+      listeners.push(fn);
+      try { fn(status()); } catch (e) { /* ignore */ }
+      return function () {
+        var i = listeners.indexOf(fn);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    },
+  };
+})();
+
+
 // ═══════ src/ui.js ═══════
 /* ==========================================================================
    PoolGame.UI — menu, HUD, overlays, synthesized audio
@@ -8011,6 +8195,45 @@ window.PoolGame = window.PoolGame || {};
 
   /* back control */
   /* studio credit — mirrors .pgui-back's inset so the two sit on one line */
+  // Shown only while a finger is the pointer: locking orientation is a phone
+  // concern, and on a desktop the API exists but every call rejects.
+  '.pgui-coarse-only{display:none;}' +
+  'body.pg-coarse .pgui-coarse-only{display:flex;}' +
+
+  /* ---- full screen (menu) ---- */
+  // Top-left of the menu, mirroring the studio credit top-right. Quiet until
+  // hovered: it is a convenience, not the thing the screen is for.
+  '.pgui-fullbtn{position:absolute;top:clamp(16px,3vmin,36px);left:clamp(16px,3vw,44px);' +
+    'z-index:5;appearance:none;cursor:pointer;font:inherit;display:flex;align-items:center;' +
+    'gap:.55em;min-height:44px;padding:.7em 1.15em;border-radius:999px;' +
+    'font-size:clamp(9px,1.05vmin,12px);font-weight:700;letter-spacing:.2em;' +
+    'text-indent:.2em;text-transform:uppercase;color:rgba(201,168,106,.72);' +
+    'border:1px solid rgba(201,168,106,.28);background:rgba(12,18,15,.6);' +
+    '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);' +
+    'transition:color .2s ease,border-color .2s ease,background .2s ease;}' +
+  '.pgui-fullbtn:hover{color:rgba(228,214,182,.95);border-color:rgba(201,168,106,.6);' +
+    'background:rgba(20,28,23,.8);}' +
+  '.pgui-fullbtn.on{color:rgba(228,214,182,.92);border-color:rgba(201,168,106,.5);}' +
+  // Two corner brackets, drawn rather than an icon font. They point outward
+  // when it will expand and inward when it will collapse, which is the only
+  // part of the control anyone reads at a glance.
+  '.pgui-fullbtn-ic{width:1em;height:1em;flex:0 0 auto;position:relative;}' +
+  '.pgui-fullbtn-ic::before,.pgui-fullbtn-ic::after{content:"";position:absolute;' +
+    'width:.42em;height:.42em;border:1.5px solid currentColor;}' +
+  '.pgui-fullbtn-ic::before{top:0;left:0;border-right:0;border-bottom:0;}' +
+  '.pgui-fullbtn-ic::after{bottom:0;right:0;border-left:0;border-top:0;}' +
+  '.pgui-fullbtn.on .pgui-fullbtn-ic::before{top:.12em;left:.12em;' +
+    'border:1.5px solid currentColor;border-left:0;border-top:0;}' +
+  '.pgui-fullbtn.on .pgui-fullbtn-ic::after{bottom:.12em;right:.12em;' +
+    'border:1.5px solid currentColor;border-right:0;border-bottom:0;}' +
+  // Portrait phones: the studio credit already owns the top-right and the
+  // heading needs the middle, so the button loses its label and becomes a
+  // square target rather than wrapping.
+  '@media (max-width:520px){' +
+    '.pgui-fullbtn{padding:.7em;min-width:44px;justify-content:center;}' +
+    '.pgui-fullbtn span:not(.pgui-fullbtn-ic){position:absolute;width:1px;height:1px;' +
+      'overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}' +
+  '}' +
   /* ---- add to home screen (PWA) ---- */
   // Bottom-left of the menu, opposite the studio credit. Deliberately quiet:
   // this is an offer, not a call to action, and it disappears for good the
@@ -10217,6 +10440,8 @@ window.PoolGame = window.PoolGame || {};
      the chrome through setNetStatus / showNetBanner / hideNetBanner.        */
 
   var NAME_KEY = 'trueshot.net.name';
+  var LOCK_KEY = 'trueshot.fs.landscape';
+
   var URL_KEY = 'trueshot.net.url';
   // The room-code alphabet from NET_CONTRACT §1 — no O/0 and no I/1, so a code
   // read aloud over a phone can only be heard one way.
@@ -10294,6 +10519,13 @@ window.PoolGame = window.PoolGame || {};
   // which is static hosting and cannot speak WebSocket. Because the box value
   // is what gets saved and passed to Net.configure, the stale mirror would have
   // overridden the correct default and every online game would have failed.
+  // Reached through the global rather than captured at load: fullscreen.js is
+  // concatenated before this file, but a build that ever reorders them should
+  // degrade to "no full screen control" rather than throw on boot.
+  function fsObj() {
+    try { return window.PoolGame && window.PoolGame.FullScreen; } catch (e) { return null; }
+  }
+
   function serverUrl() {
     var saved = lsGet(URL_KEY, '');
     if (saved) return saved;
@@ -10989,6 +11221,47 @@ window.PoolGame = window.PoolGame || {};
     els.menuFoot.innerHTML = MENU_FOOT.home;
 
     buildInstall(menu);
+    buildFullBtn(menu);
+  }
+
+  /* ----------------------------------------------------- full screen (menu) */
+  // The in-game toggle lives in the HUD, which does not exist on the menu — and
+  // the menu is exactly where you want the browser bars gone, before you start
+  // aiming rather than after. Same action, two places, one source of truth.
+
+  function buildFullBtn(menu) {
+    if (els.fullBtn) return;
+    var FS = fsObj();
+    if (!FS || !FS.supported()) return;
+
+    var b = el('button', 'pgui-fullbtn', menu);
+    b.type = 'button';
+    els.fullBtn = b;
+    els.fullBtnIc = el('span', 'pgui-fullbtn-ic', b, '');
+    els.fullBtnTx = el('span', null, b, 'Full screen');
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!menuLive()) return;
+      FS.toggle();
+    });
+    b.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    b.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+    paintFullBtn();
+  }
+
+  function paintFullBtn() {
+    if (!els.fullBtn) return;
+    var FS = fsObj();
+    if (!FS) return;
+    var on = FS.active();
+    els.fullBtn.classList.toggle('on', on);
+    els.fullBtnTx.textContent = on ? 'Exit full screen' : 'Full screen';
+    els.fullBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // Inside an installed copy the browser has no chrome to hide, so the
+    // control has nothing to do and is not shown.
+    var P = window.PoolGame && window.PoolGame.PWA;
+    var installed = !!(P && P.status && P.status().installed);
+    els.fullBtn.classList.toggle('pgui-gone', installed);
   }
 
   /* ------------------------------------------------- add to home screen */
@@ -11434,6 +11707,42 @@ window.PoolGame = window.PoolGame || {};
     els.tgMarkers = toggle('Target markers', true, 'H', function (v) {
       if (callbacks && callbacks.onMarkersToggle) callbacks.onMarkersToggle(v);
     });
+
+    // Full screen. Only built where it can actually work — on iPhone Safari
+    // there is no Fullscreen API at all, and a switch that silently does
+    // nothing is worse than no switch. Those players get the home-screen
+    // install instead, which is a real full screen.
+    var FS = fsObj();
+    if (FS && FS.supported()) {
+      els.tgFull = toggle('Full screen', FS.active(), 'F', function (v) {
+        if (v) FS.enter(); else FS.exit();
+      });
+      els.tgFullRow = toggles.lastChild;
+      // Landscape lock rides underneath the full screen switch: it is only
+      // meaningful while full screen and only possible on a phone.
+      //
+      // Built whenever the API exists at all, then SHOWN by pointer mode in
+      // CSS. Deciding at build time whether the pointer is coarse would bake in
+      // whatever was true at boot, and TOUCH_CONTRACT §1 is explicit that the
+      // mode changes live — a 2-in-1 that starts on the keyboard and is then
+      // picked up would never see this switch appear.
+      var so = window.screen && window.screen.orientation;
+      if (so && typeof so.lock === 'function') {
+        FS.setLandscape(lsGet(LOCK_KEY, '') !== '0');
+        els.tgLock = toggle('Lock landscape', FS.landscape(), null, function (v) {
+          FS.setLandscape(v);
+          lsSet(LOCK_KEY, v ? '1' : '0');
+        });
+        els.tgLockRow = toggles.lastChild;
+        els.tgLockRow.classList.add('pgui-coarse-only');
+      }
+      // The browser can leave full screen without us — Escape, the back
+      // gesture — and the switch has to follow rather than keep saying ON.
+      FS.onChange(function (st) {
+        if (els.tgFull) els.tgFull.set(st.active, false);
+        paintFullBtn();
+      });
+    }
 
     // The two hint strings (HINT_FINE / HINT_COARSE) live with the input-mode
     // code: which one is showing is a property of the pointer in use, not of
@@ -16201,6 +16510,17 @@ window.PoolGame = window.PoolGame || {};
     if (e.key === 'Tab') { e.preventDefault(); if (state === 'aim') snapToNextBall(); return; }
     if (e.key === 'h' || e.key === 'H') {
       setMarkers(!markersOn);
+      return;
+    }
+    // A keydown counts as a user gesture, so this is a legal place to request
+    // full screen. Silent where the API does not exist (iPhone Safari) rather
+    // than reporting a failure the player can do nothing about.
+    if (e.key === 'f' || e.key === 'F') {
+      var FS = PoolGame.FullScreen;
+      if (FS && FS.supported()) {
+        e.preventDefault();
+        FS.toggle();
+      }
       return;
     }
     if (e.key === 'c' || e.key === 'C') {
