@@ -10,7 +10,7 @@
  */
 'use strict';
 
-const VERSION = '868bd1cb99dc';
+const VERSION = 'fdeaad4e755c';
 const CACHE = 'tsb-' + VERSION;
 const ASSETS = [
   "./",

@@ -6702,6 +6702,16 @@ window.PoolGame = window.PoolGame || {};
     return (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host;
   }
 
+  // Loopback, or one of the three private IPv4 ranges — i.e. a machine on the
+  // same network as the player. Anything else is the open internet, where no
+  // amount of configuration produces a LAN game.
+  var LOCAL_HOST_RE =
+    /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\]|::1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[\w-]+\.local)$/i;
+
+  function isLocalHost(h) {
+    return LOCAL_HOST_RE.test(String(h || ''));
+  }
+
   function defaultUrl() {
     var loc = (typeof location !== 'undefined') ? location : null;
     var served = loc && (loc.protocol === 'https:' || loc.protocol === 'http:') && loc.host;
@@ -6716,13 +6726,22 @@ window.PoolGame = window.PoolGame || {};
 
     // LAN: the page came from the host machine, so the relay is on the same
     // host and the same port. This is the whole reason the server serves both.
-    if (served) return sameOriginWs(loc);
+    //
+    // But ONLY from a local or private address. Deriving the relay from any
+    // served origin was wrong: the published copy on allappsjohnnie.com then
+    // dialled wss://allappsjohnnie.com, which is static hosting and cannot hold
+    // a WebSocket open, and the player got "cannot reach the game server" naming
+    // an address that could never have worked. Worse, it is not fixable by
+    // pointing that page at a LAN host instead — an https page may not open a
+    // plain ws:// connection to a private address, and browsers offer no
+    // override. A public origin therefore has no LAN relay, full stop, and
+    // saying so is the only honest answer.
+    if (served && isLocalHost(loc.hostname)) return sameOriginWs(loc);
 
-    // file:// — someone was emailed the HTML and double-clicked it. In LAN mode
-    // there is no host to derive and no internet relay to fall back to, so this
-    // returns nothing rather than dialling an address that was never there.
-    // ui.js reads the empty string and explains how to start a host instead of
-    // showing a Join button that cannot work. (LAN_CONTRACT §3, §4.)
+    // Nothing to derive: either a file:// copy someone was emailed, or the
+    // published copy on the open web. ui.js reads the empty string and explains
+    // how to start a host instead of showing a Join button that cannot work.
+    // (LAN_CONTRACT §3, §4.)
     return '';
   }
 
@@ -7260,6 +7279,18 @@ window.PoolGame = window.PoolGame || {};
     INTERNET_URL: INTERNET_URL,
     setMode: function (m) {
       try { return setMode(m); } catch (e) { return false; }
+    },
+
+    // Why there is no host to join, so the UI can say something useful rather
+    // than something vague: 'ok' | 'file' | 'public' | 'internet'.
+    hostSituation: function () {
+      try {
+        if (MODE !== 'lan') return 'internet';
+        var loc = (typeof location !== 'undefined') ? location : null;
+        var served = loc && (loc.protocol === 'https:' || loc.protocol === 'http:') && loc.host;
+        if (!served) return 'file';
+        return isLocalHost(loc.hostname) ? 'ok' : 'public';
+      } catch (e) { return 'file'; }
     },
 
     host: function (gameId, name) {
@@ -7878,6 +7909,9 @@ window.PoolGame = window.PoolGame || {};
   /* V4: this used to carry the in-game control hints ("Move mouse to aim …
      Esc menu") on every menu screen, where not one of those inputs does
      anything. showScreen() now writes menu-appropriate copy per screen. */
+  // The footer is pinned, so a long screen scrolls its own content underneath
+  // it and the two sets of words overlap. The inner column reserves the space.
+  '.pgui-menu-inner{padding-bottom:calc(clamp(16px,3.2vmin,38px) + 3.4em);}' +
   '.pgui-menu-foot{position:absolute;bottom:clamp(16px,3.2vmin,38px);left:0;right:0;text-align:center;' +
     'font-size:clamp(10px,1.15vmin,13px);letter-spacing:.16em;color:rgba(232,228,218,.55);padding:0 4vw;}' +
   '.pgui-menu-foot b{color:rgba(201,168,106,.85);font-weight:700;}' +
@@ -8207,10 +8241,23 @@ window.PoolGame = window.PoolGame || {};
   '.pgui-coarse-only{display:none;}' +
   'body.pg-coarse .pgui-coarse-only{display:flex;}' +
 
+  '.pgui-lannote-body{display:flex;flex-direction:column;gap:.7em;}' +
+  '.pgui-lannote-body b{color:rgba(236,226,204,.96);}' +
+  '.pgui-lannote-body span{display:block;}' +
+  '.pgui-lannote-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;' +
+    'font-size:.94em;padding:.15em .45em;border-radius:.35em;' +
+    'background:rgba(201,168,106,.14);color:rgba(236,214,168,.95);' +
+    'white-space:nowrap;}' +
+  '.pgui-lannote-ok{color:rgba(180,214,190,.9);}' +
+
   /* ---- full screen (menu) ---- */
   // Top-left of the menu, mirroring the studio credit top-right. Quiet until
   // hovered: it is a convenience, not the thing the screen is for.
-  '.pgui-fullbtn{position:absolute;top:clamp(16px,3vmin,36px);left:clamp(16px,3vw,44px);' +
+  // Under the studio credit on the right, NOT top-left: the Back button on every
+  // sub-screen uses exactly the top-left coordinates this used to, and sat
+  // completely hidden underneath it.
+  '.pgui-fullbtn{position:absolute;top:calc(clamp(16px,3vmin,36px) + 2.9em);' +
+    'right:clamp(16px,3vw,44px);' +
     'z-index:5;appearance:none;cursor:pointer;font:inherit;display:flex;align-items:center;' +
     'gap:.55em;min-height:44px;padding:.7em 1.15em;border-radius:999px;' +
     'font-size:clamp(9px,1.05vmin,12px);font-weight:700;letter-spacing:.2em;' +
@@ -11076,6 +11123,37 @@ window.PoolGame = window.PoolGame || {};
     paintMultiTab();
   }
 
+  // Why there is no host, in the player's terms, with the fix. The old version
+  // of this said one thing about file:// and nothing at all about the copy
+  // served from the website — which is the case a real player actually hits,
+  // because the website is where the game lives. They got "cannot reach the
+  // game server at wss://allappsjohnnie.com", an address that could never have
+  // worked, and no hint that the problem was the page they were standing on.
+  var LAN_NOTE = {
+    'public': '<b>Same WiFi play needs the game running on one of your own machines.</b>' +
+      '<span>This copy is on the web, and a web page cannot reach a game server ' +
+      'sitting on your home network — browsers block that, and there is no setting ' +
+      'to change it.</span>' +
+      '<span>On one computer on your WiFi, open the <code>server</code> folder and run ' +
+      '<code>npm start</code> (or double-click <code>host-game.cmd</code> on Windows). ' +
+      'It prints an address like <code>http://192.168.1.42:8080</code> and a QR code. ' +
+      '<b>Open that address on both devices</b> — not this one — and host from there.</span>',
+    'file': '<b>This page was opened straight from a file, so nothing is serving it.</b>' +
+      '<span>On one computer on your WiFi, open the <code>server</code> folder and run ' +
+      '<code>npm start</code> (or double-click <code>host-game.cmd</code> on Windows). ' +
+      'It prints an address and a QR code. Open that address on both devices and host ' +
+      'from there.</span>',
+  };
+
+  function paintLanNote() {
+    if (!els.lanNoteBody) return;
+    var n = netObj();
+    var why = (n && n.hostSituation) ? n.hostSituation() : 'file';
+    els.lanNoteBody.innerHTML = (LAN_NOTE[why] || LAN_NOTE.file) +
+      '<span class="pgui-lannote-ok"><b>Same screen</b> play needs none of this ' +
+      'and works right here.</span>';
+  }
+
   function paintMultiTab() {
     var online = netUI.tab === 'online';
     if (els.tabLocal) els.tabLocal.classList.toggle('on', !online);
@@ -11087,6 +11165,7 @@ window.PoolGame = window.PoolGame || {};
     // page WITH a saved server address is a working setup, and a local
     // protocol test would hide the Join button on it for no reason.
     var lanFile = online && lanOrphan();
+    if (lanFile) paintLanNote();
     if (els.netJoin) els.netJoin.classList.toggle('pgui-gone', lanFile);
     if (els.lanNote) els.lanNote.classList.toggle('pgui-show', lanFile);
     if (els.listSub) {
@@ -11202,11 +11281,8 @@ window.PoolGame = window.PoolGame || {};
     // relay from, so a Join button here could only ever fail. Say how to start
     // the host instead — that is the one thing the player can actually do.
     els.lanNote = el('div', 'pgui-lannote', list);
-    els.lanNote.innerHTML =
-      'This page was opened straight from a file, so there is no game server behind it. ' +
-      'On one computer on this WiFi, run <code>node server/index.js</code> — it prints an ' +
-      'address and a QR code. Open that address on this device and on your opponent’s, ' +
-      'and host from there. <b>Same screen</b> play needs none of this and still works here.';
+    els.lanNoteBody = el('div', 'pgui-lannote-body', els.lanNote);
+    paintLanNote();
 
     els.gameGrid = el('div', 'pgui-gamegrid', list);
 
