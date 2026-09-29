@@ -417,21 +417,6 @@
   /* live sky canvas: turning starfield, meteors, comets, asteroids, rockets, moon */
   .sky{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;}
 
-  /* spinning spiral galaxy in the header */
-  header{position:relative;}
-  .galaxy-hero{
-    position:absolute;right:0;top:-48px;width:500px;height:215px;display:block;
-    pointer-events:auto;cursor:crosshair;
-  }
-  .galaxy-hero canvas{width:100%;height:100%;display:block;}
-  .brand,.sub,.controls{position:relative;z-index:1;}
-  @media (max-width:1140px){
-    .galaxy-hero{position:relative;right:auto;top:auto;width:100%;max-width:520px;height:200px;margin:4px auto -10px;}
-  }
-  @media (max-width:600px){
-    .galaxy-hero{height:170px;}
-  }
-
   /* quotes fade up when scrolled to */
   .quote-block.reveal, footer.reveal{transform:translateY(18px);}
 
@@ -571,9 +556,6 @@
         <h1>All<span class="gold">Apps</span>Johnnie</h1>
       </div>
       <p class="sub">Science<span class="sep">•</span>Spirit<span class="sep">•</span>Signal — everything I build, in one place.</p>
-      <div class="galaxy-hero" title="Move your cursor over the galaxy">
-        <canvas id="galaxy" aria-hidden="true"></canvas>
-      </div>
       <div class="controls">
         <div class="search-wrap">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
@@ -819,75 +801,6 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       return { ctx: ctx, w: r.width, h: r.height };
     }
-
-    /* ---------- spinning spiral galaxy ---------- */
-    (function(){
-      const cv = document.getElementById('galaxy');
-      if (!cv) return;
-      let W, H, ctx, stars = [];
-      const ARMS = 2, TWIST = 3.4;
-      function build(){
-        const f = fitCanvas(cv, 2); ctx = f.ctx; W = f.w; H = f.h;
-        const n = W < 400 ? 1800 : 3200;
-        stars = [];
-        for (let i = 0; i < n; i++){
-          const inBulge = Math.random() < .12;
-          const r = inBulge ? .02 + Math.pow(Math.random(), 1.3) * .2 : .08 + Math.pow(Math.random(), .9) * .92;
-          const arm = (Math.random() * ARMS) | 0;
-          const spread = inBulge ? TAU : (.18 + r * .5) * (Math.random() - .5) * 2;
-          const a = arm * TAU / ARMS + TWIST * Math.log(r + .05) + spread;
-          let col;
-          if (inBulge || r < .18) col = Math.random() < .5 ? '255,226,170' : '255,244,220';
-          else if (Math.random() < .07) col = '255,120,170';         // star-forming knots
-          else col = Math.random() < .6 ? '170,200,255' : '225,235,255';
-          stars.push({ r: r, a: a, s: inBulge ? rnd(.5, 1.1) : rnd(.6, 1.9), col: col, glow: !inBulge && Math.random() < .35,
-            al: inBulge ? rnd(.08, .28) : rnd(.35, .95), tw: rnd(1, 4), ph: rnd(0, TAU),
-            z: rnd(-1, 1) * (1 - r) * .08 });
-        }
-      }
-      build(); addEventListener('resize', build);
-
-      let spin = 0, speed = 1, target = 1, last = performance.now(), mx = -1, my = -1;
-      const host = cv.parentElement;
-      host.addEventListener('pointermove', e => { const b = cv.getBoundingClientRect(); mx = e.clientX - b.left; my = e.clientY - b.top; target = 4; });
-      host.addEventListener('pointerleave', () => { mx = my = -1; target = 1; });
-
-      function frame(now){
-        const dt = Math.min(.05, (now - last) / 1000); last = now;
-        speed += (target - speed) * Math.min(1, dt * 2.5);
-        if (!reduceMotion) spin += dt * .22 * speed;          // ~28 s per turn, faster on hover
-        const t = now / 1000;
-        ctx.clearRect(0, 0, W, H);
-        const cx = W / 2, cy = H / 2, R = Math.min(W * .44, H * .88);
-        const TILT = .5, ROT = -.35, cr = Math.cos(ROT), sr = Math.sin(ROT);
-
-        // halo + core glow
-        let g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * .75);
-        g.addColorStop(0, 'rgba(150,120,255,.22)'); g.addColorStop(1, 'rgba(150,120,255,0)');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(cx, cy, R * .8, R * .8 * TILT * 1.4, ROT, 0, TAU); ctx.fill();
-
-        ctx.globalCompositeOperation = 'lighter';
-        for (let i = 0; i < stars.length; i++){
-          const s = stars[i];
-          const a = s.a + spin * (1.15 - s.r * .45);            // inner parts turn a little faster
-          let x = Math.cos(a) * s.r * R, y = Math.sin(a) * s.r * R * TILT + s.z * R;
-          const X = cx + x * cr - y * sr, Y = cy + x * sr + y * cr;
-          let al = s.al * (reduceMotion ? 1 : .7 + .3 * Math.sin(t * s.tw + s.ph));
-          if (mx >= 0){ const d = Math.hypot(X - mx, Y - my); if (d < 60) al = Math.min(1, al + (1 - d / 60) * .8); }
-          if (s.glow){ ctx.fillStyle = 'rgba(' + s.col + ',' + (al * .07).toFixed(3) + ')'; ctx.beginPath(); ctx.arc(X, Y, 4.5, 0, TAU); ctx.fill(); }
-          ctx.fillStyle = 'rgba(' + s.col + ',' + al.toFixed(3) + ')';
-          ctx.fillRect(X - s.s / 2, Y - s.s / 2, s.s, s.s);
-        }
-        const pulse = 1 + Math.sin(t * 1.3) * .08;
-        g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * .16 * pulse);
-        g.addColorStop(0, 'rgba(255,248,228,.75)'); g.addColorStop(.35, 'rgba(255,205,140,.3)'); g.addColorStop(1, 'rgba(255,170,90,0)');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(cx, cy, R * .16 * pulse, R * .16 * pulse * .7, ROT, 0, TAU); ctx.fill();
-        ctx.globalCompositeOperation = 'source-over';
-
-        if (!reduceMotion) requestAnimationFrame(frame);
-      }
-      requestAnimationFrame(frame);
-    })();
 
     /* ---------- live sky: stars, meteors, comets, asteroids, rockets, satellites, the Moon ---------- */
     (function(){
