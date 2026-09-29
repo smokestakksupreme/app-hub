@@ -435,13 +435,22 @@
   /* quotes fade up when scrolled to */
   .quote-block.reveal, footer.reveal{transform:translateY(18px);}
 
-  @media (prefers-reduced-motion:reduce){
-    *,*::before,*::after{animation:none !important;transition:none !important;}
-    .reveal{opacity:1 !important;transform:none !important;}
-    .shooting{display:none;}
-    h1 .gold{color:var(--gold-soft);background:none;}
+  /* motion off (visitor's choice via the corner toggle) */
+  html.still *,html.still *::before,html.still *::after{animation:none !important;transition:none !important;}
+  html.still .reveal{opacity:1 !important;transform:none !important;}
+  html.still .shooting{display:none;}
+  html.still h1 .gold{color:var(--gold-soft);background:none;}
+
+  .motion-toggle{
+    position:fixed;right:16px;bottom:16px;z-index:5;
+    font:500 12px/1 'Space Grotesk',system-ui,sans-serif;letter-spacing:.6px;
+    color:var(--muted);background:var(--panel);border:1px solid var(--line);
+    padding:8px 12px;border-radius:999px;cursor:pointer;backdrop-filter:blur(6px);
   }
+  .motion-toggle:hover{color:var(--text);border-color:var(--line-2);}
+  .motion-toggle:focus-visible{outline:2px solid var(--gold-soft);outline-offset:2px;}
 </style>
+<script>try{if(localStorage.getItem('aaj-motion')==='off')document.documentElement.classList.add('still');}catch(e){}</script>
 </head>
 <body>
 
@@ -587,6 +596,7 @@
       <p class="quote-attr">— Carl Sagan</p>
       <span class="mark">allappsjohnnie.com</span>
     </footer>
+    <button type="button" class="motion-toggle" id="motion-toggle" aria-pressed="true">✦ Motion on</button>
   </div>
 
   <script src="apps.js"></script>
@@ -711,7 +721,18 @@
     };
 
     /* ---------- motion ---------- */
-    const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // motion plays by default; visitors can switch it off with the corner button (remembered on their device)
+    const reduceMotion = document.documentElement.classList.contains('still');
+    (function(){
+      const b = document.getElementById('motion-toggle');
+      if (!b) return;
+      b.textContent = reduceMotion ? '✦ Motion off' : '✦ Motion on';
+      b.setAttribute('aria-pressed', String(!reduceMotion));
+      b.addEventListener('click', () => {
+        try { localStorage.setItem('aaj-motion', reduceMotion ? 'on' : 'off'); } catch (e) {}
+        location.reload();
+      });
+    })();
 
     // staggered reveal as things scroll into view
     const io = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
